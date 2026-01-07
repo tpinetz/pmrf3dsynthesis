@@ -1,0 +1,102 @@
+import argparse
+from pathlib import Path
+import pandas as pd
+import imageio
+import numpy as np
+import torch
+from tqdm import tqdm
+from skimage.transform import resize
+from pmrf3dsynthesis.data import constants as C
+from pmrf3dsynthesis.evaluation.ssim import SSIM3D
+from torchmetrics.image import PeakSignalNoiseRatio
+from torchmetrics.image import StructuralSimilarityIndexMeasure
+from torchmetrics.image.fid import FrechetInceptionDistance
+
+import pickle
+import logging
+
+def load_model(model_name, ckpt_path):
+    if model_name == C.MMSE_MODEL:
+        from pmrf3dsynthesis.models.mmse_model import MMSEModel
+        model = MMSEModel.load_from_checkpoint(ckpt_path)
+    elif model_name == C.OTHER_MODEL:
+        from pmrf3dsynthesis.models.other_model import OtherModel
+        model = OtherModel.load_from_checkpoint(ckpt_path)
+    else:
+        raise ValueError(f"Unknown model name: {model_name}")
+    return model
+
+
+def load_dataset(df_path):
+    keys = list(pd.read_csv(df_path).Keys)
+    
+    return keys
+
+def slice_volume_ssim(y_hat, gt):
+    ssim = StructuralSimilarityIndexMeasure(data_range=1.0)
+    scores = []
+    for i in range(y_hat.shape[2]):
+        scores.append(ssim(y_hat[:,:,i], gt[:,:,i]).item())
+    return np.mean(scores)
+
+@torch.no_grad()
+def evaluate_model(model, keys, res_path):
+    #TODO: make this not fixed paths
+    fl_oct_path = Path("/home/thomas-pinetz/data/OCT/retinsight/FundusMIP/flattened_volumes/")
+    fund_path = Path("/home/thomas-pinetz/data/OCT/retinsight/FundusMIP/Fundus_cropped/")
+
+    res_path.mkdir(exist_ok=True)
+
+    metrics = {
+        "PSNR": PeakSignalNoiseRatio(data_range=1.0),
+        "SSIM": SSIM3D(),
+        "FID": FrechetInceptionDistance(normalize=True)
+    }
+    output = {m: {} for m in metrics.keys()}
+    
+    for key in tqdm(keys, desc="Evaluating model"):
+        # Load data
+        oct_volume = resize(np.load(fl_oct_path / f"{key}.npy")[:, 100:356, :], (128, 256, 256))  # Shape: (slices, H, W)
+        fundus_image = resize(imageio.imread(fund_path / f"{key}.png"), (128, 256))  # Shape: (1, H, W)
+
+        # Perform evaluation
+        x = torch.from_numpy(fundus_image.astype(np.float32)[None, None] * 2 - 1).to('cpu')
+
+        y_hat = model(x).detach().cpu()
+
+        gt = torch.from_numpy(oct_volume[None, None]).float()
+        output["PSNR"][key] = metrics["PSNR"](y_hat * 0.5 + 0.5, gt).item()
+        output["SSIM"][key] = metrics["SSIM"](y_hat * 0.5 + 0.5, gt).item()
+
+        # FID expects images in (C, H, W) format and values in [0, 1]
+        metrics["FID"].update((y_hat[0].transpose(1, 0) * 0.5 + 0.5).repeat(1, 3, 1, 1), real=False)
+        metrics["FID"].update(gt[0].transpose(1, 0).repeat(1, 3, 1, 1), real=True)
+        logging.info(f"Evaluated {key}: PSNR={output['PSNR'][key]}, SSIM={output['SSIM'][key]}")
+
+        np.save(res_path / f"{key}.npy", y_hat.numpy()[0,0])
+
+    output["FID"] = [metrics["FID"].compute().item()]
+    logging.info(f"Computed FID: {output['FID'][0]}")
+
+    return output
+
+def run_cli():
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--ckpt_path', type=str, required=True, help='Path to the model checkpoint file.')
+    parser.add_argument('--model_name', type=str, choices=[C.MMSE_MODEL, C.OTHER_MODEL], required=True, help='Name of the model to evaluate.')
+    parser.add_argument('--df', type=str, required=True, help='Path to the dataset CSV file.')
+    parser.add_argument('--res_path', type=str, required=True, help='Path to save evaluation results.')
+    args = parser.parse_args()
+
+    model = load_model(args.model_name, args.ckpt_path)
+
+    keys = list(pd.read_csv(args.df).Keys)
+
+    eval_results = evaluate_model(model.eval().cpu(), keys, Path(args.res_path))
+    with open(Path(args.res_path) / "eval_results.pkl", "wb") as f:
+        pickle.dump(eval_results, f)
+    print(f"Evaluation Results: {eval_results}")
+
+
+if __name__ == '__main__':
+    run_cli()

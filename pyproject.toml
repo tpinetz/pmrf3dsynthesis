@@ -1,0 +1,23 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pmrf3dsynthesis"  # <--- Change this to your desired package name
+version = "0.1.0"
+description = "Analysis scripts and utilities"
+readme = "README.md"
+requires-python = ">=3.8"
+dynamic = ["dependencies"]
+
+[project.scripts]
+# command-name = "package.module:function_name"
+run-registration = "pmrf3dsynthesis.cli_fundus_oct:run_cli"
+eval-model = "pmrf3dsynthesis.eval_model:run_cli"
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["pmrf3dsynthesis*"] 
+
+[tool.setuptools.dynamic]
+dependencies = {file = ["requirements.txt"]}

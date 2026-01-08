@@ -19,7 +19,7 @@ import inspect
 import copy
 import uuid
 import types
-from pmrf3dsynthesis.models import dnnlib
+from pmrf3dsynthesis.utils import dnnlib
 
 #----------------------------------------------------------------------------
 

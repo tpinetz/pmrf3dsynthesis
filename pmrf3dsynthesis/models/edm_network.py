@@ -3,7 +3,7 @@
 
 import numpy as np
 import torch
-from pmrf3dsynthesis.models import persistence
+from pmrf3dsynthesis.utils import persistence
 from torch.nn.functional import silu
 
 #----------------------------------------------------------------------------

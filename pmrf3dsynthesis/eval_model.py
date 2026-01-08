@@ -19,9 +19,9 @@ def load_model(model_name, ckpt_path):
     if model_name == C.MMSE_MODEL:
         from pmrf3dsynthesis.models.mmse_model import MMSEModel
         model = MMSEModel.load_from_checkpoint(ckpt_path)
-    elif model_name == C.OTHER_MODEL:
-        from pmrf3dsynthesis.models.other_model import OtherModel
-        model = OtherModel.load_from_checkpoint(ckpt_path)
+    elif model_name == C.FLOW_MODEL:
+        from pmrf3dsynthesis.models.flow_model import FlowModel
+        model = FlowModel.load_from_checkpoint(ckpt_path)
     else:
         raise ValueError(f"Unknown model name: {model_name}")
     return model
@@ -83,7 +83,7 @@ def evaluate_model(model, keys, res_path):
 def run_cli():
     parser = argparse.ArgumentParser()
     parser.add_argument('--ckpt_path', type=str, required=True, help='Path to the model checkpoint file.')
-    parser.add_argument('--model_name', type=str, choices=[C.MMSE_MODEL, C.OTHER_MODEL], required=True, help='Name of the model to evaluate.')
+    parser.add_argument('--model_name', type=str, choices=[C.MMSE_MODEL, C.FLOW_MODEL], required=True, help='Name of the model to evaluate.')
     parser.add_argument('--df', type=str, required=True, help='Path to the dataset CSV file.')
     parser.add_argument('--res_path', type=str, required=True, help='Path to save evaluation results.')
     args = parser.parse_args()

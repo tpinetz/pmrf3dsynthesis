@@ -10,3 +10,5 @@ torchvision==0.24.1
 tqdm==4.67.1
 pandas==2.3
 torch-fidelity
+pytorch-lightning-bolts
+einops

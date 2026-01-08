@@ -30,4 +30,4 @@ STUDY_SUDETES = "SUDETES"
 STUDY_APENNINES = "APENNINES"
 
 MMSE_MODEL = "mmse_model"
-OTHER_MODEL = "other_model"
+FLOW_MODEL = "flow_model"

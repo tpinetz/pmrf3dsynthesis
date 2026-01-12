@@ -6,60 +6,77 @@ import logging
 logging.basicConfig(level=logging.INFO)
 
 
-def register_three_stages(fixed: sitk.Image, moving: sitk.Image, sampling_percentage: float = 0.1) -> sitk.Image:
-    """Register two images using a three-stage approach.
-       Expects the two images to be grayscale.
-    Args:
-        fixed (sitk.Image): The fixed image (e.g., OCT MIP).
-        moving (sitk.Image): The moving image (e.g., Fundus).
-
-    Returns:
-        sitk.Image: The registered moving image.
+def initialize_fundus_to_oct(fixed_oct, moving_fundus, fundus_fovea_index):
     """
+    fixed_oct: The OCT image (Target) - centered on fovea
+    moving_fundus: The Fundus image (Source) - moving to match OCT
+    fundus_fovea_index: The (x, y) pixel coordinates of the fovea on the Fundus
+    """
+    
+    # 1. Identify the Target Point (Center of OCT)
+    oct_size = fixed_oct.GetSize()
+    oct_center_index = [sz / 2.0 for sz in oct_size]
+    
+    # Convert to physical space (mm)
+    p_fixed_oct = fixed_oct.TransformContinuousIndexToPhysicalPoint(oct_center_index)
+    
+    # 2. Identify the Source Point (Fovea on Fundus)
+    p_moving_fundus = moving_fundus.TransformContinuousIndexToPhysicalPoint(fundus_fovea_index)
+    
+    # 3. Create the Rigid Transform
+    init_transform = sitk.Euler2DTransform()
+    
+    # CRITICAL: Set the center of rotation to the FUNDUS Fovea.
+    # We want to pin the Fundus at this point.
+    init_transform.SetCenter(p_moving_fundus)
+    
+    # 4. Calculate Translation (Target - Source)
+    # This moves the Fundus fovea until it sits on top of the OCT center.
+    translation_vector = [Pf - Pm for Pf, Pm in zip(p_fixed_oct, p_moving_fundus)]
+    init_transform.SetTranslation(translation_vector)
+    
+    print(f"Anchoring Moving Fundus Fovea {p_moving_fundus} -> Fixed OCT Center {p_fixed_oct}")
+    print(f"Computed Translation: {translation_vector}")
+    
+    return init_transform
 
+def register_three_stages(fixed, moving, fovea_point):
     # ==========================================
     # STAGE 1: RAW IMAGES + RIGID (EULER)
     # ==========================================
-    logging.info("\n--- STAGE 1: Rigid Registration (Raw Images) ---")
+    print("\n--- STAGE 1: Rigid Registration (Raw Images) ---")
     
     R1 = sitk.ImageRegistrationMethod()
+
+    initial_tx = initialize_fundus_to_oct(fixed, moving, fovea_point).GetInverse()
     
-    # Initialize Geometry (Centers the images)
-    initial_tx = sitk.CenteredTransformInitializer(
-        fixed, moving, sitk.Euler2DTransform(), 
-        sitk.CenteredTransformInitializerFilter.GEOMETRY
-    )
     R1.SetInitialTransform(initial_tx, inPlace=False)
     
     # Metric: Mutual Information (Different Modalities)
     R1.SetMetricAsMattesMutualInformation(numberOfHistogramBins=50)
     R1.SetMetricSamplingStrategy(R1.RANDOM)
-    R1.SetMetricSamplingPercentage(sampling_percentage)
+    R1.SetMetricSamplingPercentage(0.05)
     
     # Optimizer
-    R1.SetOptimizerAsGradientDescent(learningRate=1.0, numberOfIterations=100)
+    R1.SetOptimizerAsGradientDescent(learningRate=1.0, numberOfIterations=500)
     R1.SetOptimizerScalesFromPhysicalShift()
     
     try:
         rigid_result = R1.Execute(fixed, moving)
-        logging.info(f"Stage 1 Metric: {R1.GetMetricValue():.4f}")
+        print(f"Stage 1 Metric: {R1.GetMetricValue():.4f}")
     except Exception as e:
-        if sampling_percentage < 0.5:
-            logging.warning(f"Stage 1 Failed: {e} Retrying with larger sampling percentage.")
-            return register_three_stages(fixed, moving, sampling_percentage=min(0.5, sampling_percentage * 2))
-        else:
-            logging.warning(f"Stage 1 Failed: {e}. Aborting registration.")
-        raise e
+        print(f"Stage 1 Failed: {e}")
+        return
 
     # ==========================================
     # STAGE 2: VESSEL MAPS + AFFINE
     # ==========================================
-    logging.info("\n--- STAGE 2: Affine Registration (Vessel Maps) ---")
+    print("\n--- STAGE 2: Affine Registration (Vessel Maps) ---")
     
     # 1. Generate Vessel Maps
-    logging.info("Extracting vessels...")
-    fixed_vessels = extract_vessels(fixed)
-    moving_vessels = extract_vessels(moving)
+    print("Extracting vessels...")
+    fixed_vessels = extract_vessels(fixed, 5, 8)
+    moving_vessels = extract_vessels(moving, 5, 8)
     
     # 2. Convert Rigid Result to Affine for Initialization
     # This "promotes" the transform so we can add shearing/scaling optimization
@@ -70,21 +87,25 @@ def register_three_stages(fixed: sitk.Image, moving: sitk.Image, sampling_percen
     
     # Metric: Mean Squares (Same Modality: Vessel vs Vessel)
     R2.SetMetricAsMeanSquares()
+    # R2.SetMetricAsMattesMutualInformation(numberOfHistogramBins=50)
     R2.SetMetricSamplingStrategy(R2.RANDOM)
     R2.SetMetricSamplingPercentage(0.10)
     
     # Optimizer: Affine is harder, so we use more iterations
-    R2.SetOptimizerAsGradientDescent(learningRate=0.1, numberOfIterations=200)
+    R2.SetOptimizerAsGradientDescent(learningRate=0.1, numberOfIterations=1000)
     R2.SetOptimizerScalesFromPhysicalShift()
     
     try:
         final_affine = R2.Execute(fixed_vessels, moving_vessels)
-        logging.info(f"Stage 2 Metric: {R2.GetMetricValue():.4f}")
+        print(f"Stage 2 Metric: {R2.GetMetricValue():.4f}")
     except Exception as e:
-        logging.warning(f"Stage 2 Failed: {e}")
+        print(f"Stage 2 Failed: {e}")
         return
 
-    logging.info("--- STAGE 3: Starting B-spline registration ---")
+    # ==========================================
+    # APPLY & SAVE
+    # ==========================================
+    print("\n--- Applying Final Transform ---")
     resampler = sitk.ResampleImageFilter()
     resampler.SetReferenceImage(fixed)
     resampler.SetInterpolator(sitk.sitkLinear)
@@ -100,8 +121,8 @@ def register_three_stages(fixed: sitk.Image, moving: sitk.Image, sampling_percen
         transformDomainMeshSize=transform_domain_mesh_size,
         order=3  # Standard cubic B-spline
     )
-
-    logging.info(f"Initial Number of Parameters: {initial_transform.GetNumberOfParameters()}")
+    
+    print(f"Initial Number of Parameters: {initial_transform.GetNumberOfParameters()}")
     
     # 2. Set up the Registration Method
     registration_method = sitk.ImageRegistrationMethod()
@@ -127,19 +148,13 @@ def register_three_stages(fixed: sitk.Image, moving: sitk.Image, sampling_percen
     registration_method.SetInterpolator(sitk.sitkLinear)
     
     # 6. Execute Registration
+    print("--- STAGE 3: Starting B-spline registration ---")
     final_transform = registration_method.Execute(fixed_vessels, out_vessels)
+    
+    print(f"Final Metric Value: {registration_method.GetMetricValue()}")
+    print(f"Optimizer stop condition: {registration_method.GetOptimizerStopConditionDescription()}")
 
-    logging.info(f"Final Metric Value: {registration_method.GetMetricValue()}")
-    logging.info(f"Optimizer stop condition: {registration_method.GetOptimizerStopConditionDescription()}")
     final_composite = sitk.CompositeTransform(final_affine)
     final_composite.AddTransform(final_transform)
 
-    resampler = sitk.ResampleImageFilter()
-    resampler.SetReferenceImage(fixed)
-    resampler.SetInterpolator(sitk.sitkLinear)
-    resampler.SetDefaultPixelValue(0)
-    resampler.SetTransform(final_composite)
-    
-    # Return the final resampled moving image
-    return resampler.Execute(moving)
-
+    return final_composite

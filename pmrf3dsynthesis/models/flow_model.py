@@ -71,7 +71,7 @@ class FlowModel(lightning.LightningModule):
         }
         return [optimizer], [scheduler]
 
-    def forward(self, x, T):
+    def forward(self, x, T=20):
         with torch.no_grad():
             if self.map_2d_to_3d:
                 x = self.init_projection(x).permute(0, 2, 1, 3)[:,None]

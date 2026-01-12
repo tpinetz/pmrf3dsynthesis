@@ -6,6 +6,7 @@ import numpy as np
 from tqdm import tqdm
 import logging
 from skimage.transform import resize
+import fundus_image_toolbox as fit
 
 from pmrf3dsynthesis.registration.registration import register_three_stages
 
@@ -18,19 +19,35 @@ def rgb2gray(rgb):
 
     return gray
 
+def resample_rgb(image, reference, transform):
+    # 1. Split RGB into 3 separate scalar images
+    components = [sitk.VectorIndexSelectionCast(image, i) for i in range(3)]
+    
+    # 2. Resample each channel individually using standard settings
+    resampled_components = [
+        sitk.Resample(comp, reference, transform, sitk.sitkLinear, 0.0, comp.GetPixelID())
+        for comp in components
+    ]
+    
+    # 3. Merge them back into one RGB image
+    return sitk.Compose(resampled_components)
 
-def process_img(fundus_img: np.ndarray, oct_img:np.ndarray, common_size: int = -1) -> np.ndarray:
+def process_img(fundus_img: np.ndarray, projection:np.ndarray, fovea: tuple, common_size: int = -1) -> np.ndarray:
 
     if common_size > 0:
-        fixed_image = resize(oct_img.mean(axis=1), (common_size, common_size))  # in case the resolution is known
-    else:
-        fixed_image = resize(oct_img.mean(axis=1), (oct_img.shape[2], oct_img.shape[2]))    # in case the fundus image resolution is not known
+        fixed_image = resize(projection, (common_size, common_size))  # in case the resolution is known
 
+    fundus_gray = rgb2gray(fundus_img)
     fixed = sitk.GetImageFromArray((fixed_image - fixed_image.min()) / (fixed_image.max() - fixed_image.min()) * 255.)
-    moving = sitk.GetImageFromArray((fundus_img - fundus_img.min()) / (fundus_img.max() - fundus_img.min()) * 255.)
-    out = register_three_stages(fixed, moving)
+    moving = sitk.GetImageFromArray((fundus_gray - fundus_gray.min()) / (fundus_gray.max() - fundus_gray.min()) * 255.)
+    transform = register_three_stages(fixed, moving, fovea)
 
-    return sitk.GetArrayFromImage(out)
+
+    moving_img = sitk.Cast(sitk.GetImageFromArray(fundus_img / 255., isVector=True), sitk.sitkVectorFloat32)
+    # Ensure vector image has the same spatial metadata (origin/spacing/direction) as the grayscale image used for registration
+    moving_img.CopyInformation(moving)
+    out = resample_rgb(moving_img, fixed, transform)
+    return sitk.GetArrayFromImage(out) * 255.
 
 
 
@@ -40,14 +57,23 @@ def main(fundus_path: Path, oct_path: Path, res_path: Path, common_size: int = -
         fundus_imgs = list(fundus_path.iterdir())
     else:
         fundus_imgs = [fundus_path]
+
+    print("Loading model")
+    device = "cuda"
+    checkpoint_dir = "default"
+    fov_model, _ = fit.load_fovea_od_model(checkpoint_dir, device=device, return_test_dataloader=False)
     
     logging.info(f"Found {len(fundus_imgs)} fundus images to process.")
     for fundus_img_path in tqdm(fundus_imgs):
         try:
             oct_img_path = oct_path / (fundus_img_path.name.split(".")[0] + ".npy")
-            fundus_img = rgb2gray(imageio.imread(fundus_img_path))
+            fundus_img = imageio.imread(fundus_img_path)
+            fovea_x, fovea_y, _, _ = fov_model.predict(str(fundus_img_path))
             oct_img = np.load(oct_img_path)
-            registered_mip = process_img(fundus_img, oct_img, common_size=common_size)
+            pat_oct_seg = np.load(oct_path.parent / 'flattened_segmentations' / (oct_img_path.name.split(".")[0] + ".npy"))
+            on_values = ((pat_oct_seg > 8) & (pat_oct_seg < 12))
+            projection = (oct_img * on_values).sum(axis=1) / np.maximum(on_values.sum(axis=1), 1)
+            registered_mip = process_img(fundus_img, projection, (float(fovea_x), float(fovea_y)), common_size=common_size)
             save_path = res_path / fundus_img_path.name
             imageio.imwrite(save_path, registered_mip.astype(np.uint8))
         except FileNotFoundError as e:

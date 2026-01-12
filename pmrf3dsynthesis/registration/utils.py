@@ -3,7 +3,7 @@ import numpy as np
 from skimage.filters import frangi
 from skimage import exposure
 
-def extract_vessels(sitk_image):
+def extract_vessels(sitk_image, sigma_min=1, sigma_max=6):
     """
     Takes a SimpleITK image, converts to numpy, enhances contrast,
     and applies Frangi vesselness filter. Returns a SimpleITK image.
@@ -20,7 +20,7 @@ def extract_vessels(sitk_image):
 
     # 4. Frangi Vesselness Filter
     # sigmas: range of vessel scales (1 to 6 pixels is typical for retina)
-    vessel_map = frangi(img_arr, sigmas=range(5, 10), black_ridges=False)
+    vessel_map = frangi(img_arr, sigmas=range(sigma_min, sigma_max), black_ridges=False)
     
     # 5. Convert back to SimpleITK
     vessel_image = sitk.GetImageFromArray(vessel_map)

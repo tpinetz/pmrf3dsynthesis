@@ -32,6 +32,7 @@ class FlowModel(lightning.LightningModule):
         self.network_name = config.get("network_name", C.SONG_UNET)
         self.t_eps = config.get("t_eps", 5e-2)
         self.map_2d_to_3d = config.get("map_2d_to_3d", False)
+        self.mmse_model = None
 
         if self.network_name == C.SONG_UNET:
             self.network = SongUNet(config.get("image_resolution", 224), config.get("in_channels", 1), config.get("out_channels", 1), model_channels=config.get("model_channels", 64))
@@ -71,10 +72,23 @@ class FlowModel(lightning.LightningModule):
         }
         return [optimizer], [scheduler]
 
+    def set_mmse_model(self, mmse_model):
+        self.mmse_model = mmse_model
+
     def forward(self, x, T=20):
-        with torch.no_grad():
-            if self.map_2d_to_3d:
-                x = self.init_projection(x).permute(0, 2, 1, 3)[:,None]
+        if self.map_2d_to_3d:
+            x = self.init_projection(x).permute(0, 2, 1, 3)[:,None]
+
+        if self.mmse_model is not None:
+            x = self.mmse_model(x)
+            y_hat = x.clone()
+            self.network = self.network  # The diffusion transformer needs to be on cuda or it does not work.
+            for i in range(T):
+                for j in range(y_hat.shape[2]):
+                    test = self.network(y_hat[:,:,j,:,:], i / T * torch.ones((1), dtype=torch.float32).to(y_hat.device), torch.zeros((1), dtype=torch.int).to(y_hat.device))
+                    vel = (test - y_hat[:,:,j,:,:]) /  max((1.0 - i / T), self.t_eps)  
+                    y_hat[:,:,j,:,:] = y_hat[:,:,j,:,:] + 1 / T * vel
+        else:
             x_orig = x + self.sigma_start * torch.randn_like(x)
             y_hat = x_orig.clone()
             for i in range(T):

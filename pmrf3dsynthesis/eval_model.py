@@ -14,6 +14,7 @@ from torchmetrics.image.fid import FrechetInceptionDistance
 
 import pickle
 import logging
+import os
 
 def load_model(model_name, ckpt_path):
     if model_name == C.MMSE_MODEL:
@@ -42,8 +43,8 @@ def slice_volume_ssim(y_hat, gt):
 @torch.no_grad()
 def evaluate_model(model, keys, res_path):
     #TODO: make this not fixed paths
-    fl_oct_path = Path("/home/thomas-pinetz/data/OCT/retinsight/FundusMIP/flattened_volumes/")
-    fund_path = Path("/home/thomas-pinetz/data/OCT/retinsight/FundusMIP/Fundus_cropped/")
+    fl_oct_path = Path(os.path.expandvars("$HOME/data/OCT/retinsight/FundusMIP/flattened_volumes/"))
+    fund_path = Path(os.path.expandvars("$HOME/data/OCT/retinsight/FundusMIP/Fundus_cropped/"))
 
     res_path.mkdir(exist_ok=True)
 
@@ -86,9 +87,17 @@ def run_cli():
     parser.add_argument('--model_name', type=str, choices=[C.MMSE_MODEL, C.FLOW_MODEL], required=True, help='Name of the model to evaluate.')
     parser.add_argument('--df', type=str, required=True, help='Path to the dataset CSV file.')
     parser.add_argument('--res_path', type=str, required=True, help='Path to save evaluation results.')
+    parser.add_argument('--mmse_path', type=str, default='', help='Path to the MMSE model file (if applicable).')
+    parser.add_argument('--device', type=str, default='cpu', help='Device to run the evaluation on.')
     args = parser.parse_args()
 
     model = load_model(args.model_name, args.ckpt_path)
+
+    if args.mmse_path:
+        mmse_model = load_model(C.MMSE_MODEL, args.mmse_path)
+        model.set_mmse_model(mmse_model)
+
+    model = model.to(args.device)
 
     keys = list(pd.read_csv(args.df).Keys)
 

@@ -9,6 +9,8 @@ from skimage.transform import resize
 from pmrf3dsynthesis.data import constants as C
 from pmrf3dsynthesis.evaluation.ssim import SSIM3D
 from pmrf3dsynthesis.evaluation.retfound_fid import RETFoundFeatureExtractor
+from pmrf3dsynthesis.models.flow_model import FlowModel
+from pmrf3dsynthesis.models.mmse_model import MMSEModel
 from torchmetrics.image import PeakSignalNoiseRatio
 from torchmetrics.image import StructuralSimilarityIndexMeasure
 from torchmetrics.image.fid import FrechetInceptionDistance
@@ -19,10 +21,8 @@ import os
 
 def load_model(model_name, ckpt_path):
     if model_name == C.MMSE_MODEL:
-        from pmrf3dsynthesis.models.mmse_model import MMSEModel
         model = MMSEModel.load_from_checkpoint(ckpt_path)
     elif model_name == C.FLOW_MODEL:
-        from pmrf3dsynthesis.models.flow_model import FlowModel
         model = FlowModel.load_from_checkpoint(ckpt_path)
     else:
         raise ValueError(f"Unknown model name: {model_name}")
@@ -67,8 +67,8 @@ def evaluate_model(model, T, keys, res_path):
         # Perform evaluation
         x = torch.from_numpy(fundus_image.astype(np.float32)[None, None] * 2 - 1).to('cpu')
 
-        if model.model_name == C.FLOW_MODEL:
-            y_hat = model.sample(x, T).detach().cpu()
+        if type(model) == FlowModel:
+            y_hat = model(x, T).detach().cpu()
         else:
             y_hat = model(x).detach().cpu()
 
@@ -77,8 +77,8 @@ def evaluate_model(model, T, keys, res_path):
         output["SSIM"][key] = metrics["SSIM"](y_hat * 0.5 + 0.5, gt).item()
 
         # FID expects images in (C, H, W) format and values in [0, 1]
-        metrics["FID"].update((y_hat[0].transpose(1, 0) * 0.5 + 0.5).repeat(1, 3, 1, 1), real=False)
-        metrics["FID"].update(gt[0].transpose(1, 0).repeat(1, 3, 1, 1), real=True)
+        metrics["FID"].update((y_hat[0].transpose(1, 0) * 0.5 + 0.5), real=False)
+        metrics["FID"].update(gt[0].transpose(1, 0), real=True)
         logging.info(f"Evaluated {key}: PSNR={output['PSNR'][key]}, SSIM={output['SSIM'][key]}")
 
         np.save(res_path / f"{key}.npy", y_hat.numpy()[0,0])
@@ -111,7 +111,7 @@ def run_cli():
 
     eval_name = args.model_name
     if args.mmse_path:
-        eval_name = "pmrf"
+        eval_name = f"pmrf_with_{args.T}_steps"
 
     res_path = Path(args.res_path) / eval_name
     res_path.mkdir(parents=True, exist_ok=True)

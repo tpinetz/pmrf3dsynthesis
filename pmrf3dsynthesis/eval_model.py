@@ -42,7 +42,7 @@ def slice_volume_ssim(y_hat, gt):
     return np.mean(scores)
 
 @torch.no_grad()
-def evaluate_model(model, T, keys, res_path):
+def evaluate_model(model, T, keys, res_path, device):
     #TODO: make this not fixed paths
     fl_oct_path = Path(os.path.expandvars("$HOME/data/OCT/retinsight/FundusMIP/flattened_volumes/"))
     fund_path = Path(os.path.expandvars("$HOME/data/OCT/retinsight/FundusMIP/Fundus_cropped/"))
@@ -65,7 +65,7 @@ def evaluate_model(model, T, keys, res_path):
         fundus_image = resize(imageio.imread(fund_path / f"{key}.png"), (128, 256))  # Shape: (1, H, W)
 
         # Perform evaluation
-        x = torch.from_numpy(fundus_image.astype(np.float32)[None, None] * 2 - 1).to('cpu')
+        x = torch.from_numpy(fundus_image.astype(np.float32)[None, None] * 2 - 1).to(device)
 
         if type(model) == FlowModel:
             y_hat = model(x, T).detach().cpu()
@@ -116,7 +116,7 @@ def run_cli():
     res_path = Path(args.res_path) / eval_name
     res_path.mkdir(parents=True, exist_ok=True)
 
-    eval_results = evaluate_model(model.eval().cpu(), args.T, keys, res_path)
+    eval_results = evaluate_model(model.eval().cpu(), args.T, keys, res_path, device=args.device)
     with open(res_path / "eval_results.pkl", "wb") as f:
         pickle.dump(eval_results, f)
     print(f"Evaluation Results: {eval_results}")

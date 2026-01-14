@@ -8,6 +8,7 @@ from tqdm import tqdm
 from skimage.transform import resize
 from pmrf3dsynthesis.data import constants as C
 from pmrf3dsynthesis.evaluation.ssim import SSIM3D
+from pmrf3dsynthesis.evaluation.retfound_fid import RETFoundFeatureExtractor
 from torchmetrics.image import PeakSignalNoiseRatio
 from torchmetrics.image import StructuralSimilarityIndexMeasure
 from torchmetrics.image.fid import FrechetInceptionDistance
@@ -41,7 +42,7 @@ def slice_volume_ssim(y_hat, gt):
     return np.mean(scores)
 
 @torch.no_grad()
-def evaluate_model(model, keys, res_path):
+def evaluate_model(model, T, keys, res_path):
     #TODO: make this not fixed paths
     fl_oct_path = Path(os.path.expandvars("$HOME/data/OCT/retinsight/FundusMIP/flattened_volumes/"))
     fund_path = Path(os.path.expandvars("$HOME/data/OCT/retinsight/FundusMIP/Fundus_cropped/"))
@@ -51,7 +52,10 @@ def evaluate_model(model, keys, res_path):
     metrics = {
         "PSNR": PeakSignalNoiseRatio(data_range=1.0),
         "SSIM": SSIM3D(),
-        "FID": FrechetInceptionDistance(normalize=True)
+        "FID":  FrechetInceptionDistance(
+        feature=RETFoundFeatureExtractor(), 
+        normalize=True  
+    )
     }
     output = {m: {} for m in metrics.keys()}
     
@@ -63,7 +67,10 @@ def evaluate_model(model, keys, res_path):
         # Perform evaluation
         x = torch.from_numpy(fundus_image.astype(np.float32)[None, None] * 2 - 1).to('cpu')
 
-        y_hat = model(x).detach().cpu()
+        if model.model_name == C.FLOW_MODEL:
+            y_hat = model.sample(x, T).detach().cpu()
+        else:
+            y_hat = model(x).detach().cpu()
 
         gt = torch.from_numpy(oct_volume[None, None]).float()
         output["PSNR"][key] = metrics["PSNR"](y_hat * 0.5 + 0.5, gt).item()
@@ -89,6 +96,7 @@ def run_cli():
     parser.add_argument('--res_path', type=str, required=True, help='Path to save evaluation results.')
     parser.add_argument('--mmse_path', type=str, default='', help='Path to the MMSE model file (if applicable).')
     parser.add_argument('--device', type=str, default='cpu', help='Device to run the evaluation on.')
+    parser.add_argument('--T', type=int, default=20, help='Number of flow steps (if applicable).')
     args = parser.parse_args()
 
     model = load_model(args.model_name, args.ckpt_path)
@@ -101,8 +109,15 @@ def run_cli():
 
     keys = list(pd.read_csv(args.df).Keys)
 
-    eval_results = evaluate_model(model.eval().cpu(), keys, Path(args.res_path))
-    with open(Path(args.res_path) / "eval_results.pkl", "wb") as f:
+    eval_name = args.model_name
+    if args.mmse_path:
+        eval_name = "pmrf"
+
+    res_path = Path(args.res_path) / eval_name
+    res_path.mkdir(parents=True, exist_ok=True)
+
+    eval_results = evaluate_model(model.eval().cpu(), args.T, keys, res_path)
+    with open(res_path / "eval_results.pkl", "wb") as f:
         pickle.dump(eval_results, f)
     print(f"Evaluation Results: {eval_results}")
 

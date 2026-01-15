@@ -102,7 +102,7 @@ def run_cli():
     model = load_model(args.model_name, args.ckpt_path)
 
     if args.mmse_path:
-        mmse_model = load_model(C.MMSE_MODEL, args.mmse_path)
+        mmse_model = load_model(C.MMSE_MODEL, args.mmse_path).to(args.device)
         model.set_mmse_model(mmse_model)
 
     model = model.to(args.device)

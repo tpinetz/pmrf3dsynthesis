@@ -13,3 +13,4 @@ torch-fidelity
 lightning-bolts
 einops
 fundus_image_toolbox
+transformers

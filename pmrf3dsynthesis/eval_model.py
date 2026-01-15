@@ -116,7 +116,7 @@ def run_cli():
     res_path = Path(args.res_path) / eval_name
     res_path.mkdir(parents=True, exist_ok=True)
 
-    eval_results = evaluate_model(model.eval().cpu(), args.T, keys, res_path, device=args.device)
+    eval_results = evaluate_model(model.eval(), args.T, keys, res_path, device=args.device)
     with open(res_path / "eval_results.pkl", "wb") as f:
         pickle.dump(eval_results, f)
     print(f"Evaluation Results: {eval_results}")

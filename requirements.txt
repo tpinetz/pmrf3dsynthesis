@@ -14,3 +14,7 @@ lightning-bolts
 einops
 fundus_image_toolbox
 transformers
+nibabel
+pydicom
+opencv-python
+lxml

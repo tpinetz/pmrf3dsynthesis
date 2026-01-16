@@ -1,14 +1,17 @@
 from pathlib import Path
 import argparse
 import SimpleITK as sitk
+import cv2
 import imageio
 import numpy as np
+from sklearn import ensemble
 from tqdm import tqdm
 import logging
 from skimage.transform import resize
 import fundus_image_toolbox as fit
 
-from pmrf3dsynthesis.registration.registration import register_three_stages
+from pmrf3dsynthesis.registration.registration import adapt_large_to_small
+from pmrf3dsynthesis.dmitry_vessel.utils import load_model, extract_vessels_oct_dmitry
 
 logging.basicConfig(level=logging.INFO)
 
@@ -58,10 +61,13 @@ def main(fundus_path: Path, oct_path: Path, res_path: Path, common_size: int = -
     else:
         fundus_imgs = [fundus_path]
 
+
     print("Loading model")
     device = "cuda"
     checkpoint_dir = "default"
     fov_model, _ = fit.load_fovea_od_model(checkpoint_dir, device=device, return_test_dataloader=False)
+    ensemble = fit.load_segmentation_ensemble(device=device)
+    ves_model = load_model().to(device)
     
     logging.info(f"Found {len(fundus_imgs)} fundus images to process.")
     for fundus_img_path in tqdm(fundus_imgs):
@@ -69,13 +75,32 @@ def main(fundus_path: Path, oct_path: Path, res_path: Path, common_size: int = -
             oct_img_path = oct_path / (fundus_img_path.name.split(".")[0] + ".npy")
             fundus_img = imageio.imread(fundus_img_path)
             fovea_x, fovea_y, _, _ = fov_model.predict(str(fundus_img_path))
+            fovea_x = int(np.round(fovea_x))
+            fovea_y = int(np.round(fovea_y))
+
+
             oct_img = np.load(oct_img_path)
-            pat_oct_seg = np.load(oct_path.parent / 'flattened_segmentations' / (oct_img_path.name.split(".")[0] + ".npy"))
-            on_values = ((pat_oct_seg > 8) & (pat_oct_seg < 12))
-            projection = (oct_img * on_values).sum(axis=1) / np.maximum(on_values.sum(axis=1), 1)
-            registered_mip = process_img(fundus_img, projection, (float(fovea_x), float(fovea_y)), common_size=common_size)
+
+
+            moving_vessels = fit.ensemble_predict_segmentation(ensemble, [str(fundus_img_path)], threshold=0.5, size=(512, 512)) 
+            fixed_vessels = extract_vessels_oct_dmitry(oct_img, ves_model, device=device)
+
+
+            if common_size < 0:
+                new_size = max(fixed_vessels.shape)  # default size if not provided
+            else:
+                new_size = common_size
+
+            fixed_vessels_uint = (resize(fixed_vessels, (new_size, new_size)) * 255).astype(np.uint8)
+            moving_vessels_uint = (moving_vessels * 255).astype(np.uint8)
+
+            rad = 700
+            _, M = adapt_large_to_small(fixed_vessels_uint,
+                                        moving_vessels_uint[max(fovea_y-rad, 0):fovea_y+rad, max(0, fovea_x-rad):fovea_x+rad])
+            cropped_fundus = cv2.warpAffine(fundus_img[max(fovea_y-rad, 0):fovea_y+rad, max(0, fovea_x-rad):fovea_x+rad], M, (new_size, new_size))
             save_path = res_path / fundus_img_path.name
-            imageio.imwrite(save_path, registered_mip.astype(np.uint8))
+
+            imageio.imwrite(save_path, cropped_fundus.astype(np.uint8))
         except FileNotFoundError as e:
             logging.warning(f"Skipping {fundus_img_path.name}: {e}")
             continue

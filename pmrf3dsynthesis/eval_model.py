@@ -1,7 +1,7 @@
 import argparse
 from pathlib import Path
 import pandas as pd
-import imageio
+import imageio.v3 as iio
 import numpy as np
 import torch
 from tqdm import tqdm
@@ -50,29 +50,29 @@ def evaluate_model(model, T, keys, res_path, device):
     res_path.mkdir(exist_ok=True)
 
     metrics = {
-        "PSNR": PeakSignalNoiseRatio(data_range=1.0),
-        "SSIM": SSIM3D(),
+        "PSNR": PeakSignalNoiseRatio(data_range=1.0).to(device),
+        "SSIM": SSIM3D().to(device),
         "FID":  FrechetInceptionDistance(
         feature=RETFoundFeatureExtractor(), 
         normalize=True  
-    )
+    ).to(device)
     }
     output = {m: {} for m in metrics.keys()}
     
     for key in tqdm(keys, desc="Evaluating model"):
         # Load data
         oct_volume = resize(np.load(fl_oct_path / f"{key}.npy")[:, 100:356, :], (128, 256, 256))  # Shape: (slices, H, W)
-        fundus_image = resize(imageio.imread(fund_path / f"{key}.png"), (128, 256))  # Shape: (1, H, W)
+        fundus_image = resize(iio.imread(fund_path / f"{key}.png"), (128, 256))  # Shape: (1, H, W)
 
         # Perform evaluation
         x = torch.from_numpy(fundus_image.astype(np.float32)[None, None] * 2 - 1).to(device)
 
         if type(model) == FlowModel:
-            y_hat = model(x, T).detach().cpu()
+            y_hat = model(x, T)
         else:
-            y_hat = model(x).detach().cpu()
+            y_hat = model(x)
 
-        gt = torch.from_numpy(oct_volume[None, None]).float()
+        gt = torch.from_numpy(oct_volume[None, None]).float().to(device)
         output["PSNR"][key] = metrics["PSNR"](y_hat * 0.5 + 0.5, gt).item()
         output["SSIM"][key] = metrics["SSIM"](y_hat * 0.5 + 0.5, gt).item()
 
@@ -81,7 +81,8 @@ def evaluate_model(model, T, keys, res_path, device):
         metrics["FID"].update(gt[0].transpose(1, 0), real=True)
         logging.info(f"Evaluated {key}: PSNR={output['PSNR'][key]}, SSIM={output['SSIM'][key]}")
 
-        np.save(res_path / f"{key}.npy", y_hat.numpy()[0,0])
+        # np.save(res_path / f"{key}.npy", y_hat.detach().cpu().numpy()[0,0])
+        break  # Remove this break to evaluate on all keys
 
     output["FID"] = [metrics["FID"].compute().item()]
     logging.info(f"Computed FID: {output['FID'][0]}")
@@ -101,6 +102,9 @@ def run_cli():
 
     model = load_model(args.model_name, args.ckpt_path)
 
+    if args.device != 'cpu':
+        torch.set_float32_matmul_precision('high')
+
     if args.mmse_path:
         mmse_model = load_model(C.MMSE_MODEL, args.mmse_path).to(args.device)
         model.set_mmse_model(mmse_model)
@@ -109,9 +113,11 @@ def run_cli():
 
     keys = list(pd.read_csv(args.df).Keys)
 
-    eval_name = args.model_name
-    if args.mmse_path:
-        eval_name = f"pmrf_with_{args.T}_steps"
+    eval_name = Path(args.ckpt_path).parent.parent.parent.name
+    if args.model_name == C.FLOW_MODEL:
+        eval_name += f"_with_{args.T}_steps"
+
+    logging.info(f"Starting evaluation: {eval_name}")
 
     res_path = Path(args.res_path) / eval_name
     res_path.mkdir(parents=True, exist_ok=True)

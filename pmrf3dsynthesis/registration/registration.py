@@ -1,6 +1,7 @@
 from pmrf3dsynthesis.registration.utils import extract_vessels, convert_rigid_to_affine
 import SimpleITK as sitk
 import numpy as np
+import cv2
 
 import logging
 logging.basicConfig(level=logging.INFO)
@@ -158,3 +159,101 @@ def register_three_stages(fixed, moving, fovea_point):
     final_composite.AddTransform(final_transform)
 
     return final_composite
+
+
+
+def adapt_large_to_small(img_small, img_large, 
+                         angle_range=(-10, 10), 
+                         scale_range=(0.9, 1.1), 
+                         steps=15):
+    """
+    Finds the small mask inside the large one, then Warps/Crops the 
+    LARGE image to match the geometry of the SMALL image.
+    """
+    
+    # --- PHASE 1: GRID SEARCH (Find where small fits in large) ---
+    # We create a list of scales and angles to test
+    scales = np.linspace(scale_range[0], scale_range[1], steps)
+    angles = np.linspace(angle_range[0], angle_range[1], steps)
+    
+    best_score = -1
+    best_params = None # Will store (scale, angle, loc_x, loc_y)
+    
+    # Blur large image once for smoother matching
+    large_smooth = cv2.GaussianBlur(img_large, (5,5), 2)
+    
+    h_small, w_small = img_small.shape[:2]
+    
+    print(f"Searching {len(scales)*len(angles)} combinations...")
+
+    for scale in scales:
+        # Resize template
+        curr_w = int(w_small * scale)
+        curr_h = int(h_small * scale)
+        resized = cv2.resize(img_small, (curr_w, curr_h), interpolation=cv2.INTER_LINEAR)
+        
+        # Center for rotation
+        center = (curr_w // 2, curr_h // 2)
+        
+        for angle in angles:
+            # Rotate template
+            M_rot = cv2.getRotationMatrix2D(center, angle, 1.0)
+            rotated = cv2.warpAffine(resized, M_rot, (curr_w, curr_h))
+            
+            # Blur template
+            rotated_smooth = cv2.GaussianBlur(rotated, (5,5), 2)
+
+            # Match
+            res = cv2.matchTemplate(large_smooth, rotated_smooth, cv2.TM_CCORR_NORMED)
+            min_val, max_val, min_loc, max_loc = cv2.minMaxLoc(res)
+            
+            if max_val > best_score:
+                best_score = max_val
+                # max_loc is the top-left corner in the large image
+                best_params = (scale, angle, max_loc)
+
+    scale, angle, (loc_x, loc_y) = best_params
+    print(f"Match: Scale={scale:.3f}, Angle={angle:.2f}°, Loc={loc_x},{loc_y}")
+
+    # --- PHASE 2: INVERSE WARP (Large -> Small) ---
+    
+    # We need to map pixels from the Large image BACK to the Small image.
+    # The robust way is to define 3 points on the 'Small' image and calculate 
+    # where they land on the 'Large' image.
+    
+    # 1. Define 3 points on the Original Small Image (Triangle)
+    #    (Top-Left, Top-Right, Bottom-Left)
+    pts_small = np.float32([ [0,0], [w_small, 0], [0, h_small] ])
+    
+    # 2. Calculate where these points are in the Rotated/Scaled state
+    #    (This mimics the transformations we did in the loop)
+    
+    # A. Scale
+    pts_scaled = pts_small * scale
+    
+    # B. Rotate
+    # Rotation was around the center of the SCALED image
+    scaled_center = (w_small * scale / 2, h_small * scale / 2)
+    M_rot = cv2.getRotationMatrix2D(scaled_center, angle, 1.0)
+    
+    # OpenCV's transform expects an array of shape (N, 1, 2)
+    pts_scaled_reshaped = np.array([pts_scaled], dtype=np.float32).transpose(1,0,2)
+    pts_rotated = cv2.transform(pts_scaled_reshaped, M_rot)[:,0,:]
+    
+    # C. Translate
+    # The 'loc_x, loc_y' from matchTemplate is the top-left of the rotated image canvas.
+    # We simply add this offset to our points.
+    pts_on_large = pts_rotated + [loc_x, loc_y]
+
+    pts_on_large = pts_on_large.astype(np.float32)
+    pts_small = pts_small.astype(np.float32)
+    
+    # 3. Compute the Affine Matrix: Large -> Small
+    # We want a matrix that takes 'pts_on_large' and maps them to 'pts_small'
+    M_final = cv2.getAffineTransform(pts_on_large, pts_small)
+    
+    # 4. Warp the Large Image
+    # Result size is exactly (w_small, h_small)
+    matched_fundus = cv2.warpAffine(img_large, M_final, (w_small, h_small))
+    
+    return matched_fundus, M_final

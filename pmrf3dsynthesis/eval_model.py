@@ -45,7 +45,7 @@ def slice_volume_ssim(y_hat, gt):
 def evaluate_model(model, T, keys, res_path, device):
     #TODO: make this not fixed paths
     fl_oct_path = Path(os.path.expandvars("$HOME/data/OCT/retinsight/FundusMIP/flattened_volumes/"))
-    fund_path = Path(os.path.expandvars("$HOME/data/OCT/retinsight/FundusMIP/Fundus_cropped/"))
+    fund_path = Path(os.path.expandvars("$HOME/data/OCT/retinsight/FundusMIP/Fundus_cropped_color/"))
 
     res_path.mkdir(exist_ok=True)
 
@@ -65,12 +65,15 @@ def evaluate_model(model, T, keys, res_path, device):
         fundus_image = resize(iio.imread(fund_path / f"{key}.png"), (128, 256))  # Shape: (1, H, W)
 
         # Perform evaluation
-        x = torch.from_numpy(fundus_image.astype(np.float32)[None, None] * 2 - 1).to(device)
+        x = torch.from_numpy(fundus_image.astype(np.float32).transpose((2,0,1))[None] * 2 - 1).to(device)
 
         if type(model) == FlowModel:
             y_hat = model(x, T)
         else:
             y_hat = model(x)
+        
+        if isinstance(y_hat, list):
+            y_hat = y_hat[-1]
 
         gt = torch.from_numpy(oct_volume[None, None]).float().to(device)
         output["PSNR"][key] = metrics["PSNR"](y_hat * 0.5 + 0.5, gt).item()
@@ -81,8 +84,8 @@ def evaluate_model(model, T, keys, res_path, device):
         metrics["FID"].update(gt[0].transpose(1, 0), real=True)
         logging.info(f"Evaluated {key}: PSNR={output['PSNR'][key]}, SSIM={output['SSIM'][key]}")
 
-        # np.save(res_path / f"{key}.npy", y_hat.detach().cpu().numpy()[0,0])
-        break  # Remove this break to evaluate on all keys
+        np.save(res_path / f"{key}.npy", y_hat.detach().cpu().numpy()[0,0])
+        # break  # Remove this break to evaluate on all keys
 
     output["FID"] = [metrics["FID"].compute().item()]
     logging.info(f"Computed FID: {output['FID'][0]}")

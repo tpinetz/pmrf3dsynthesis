@@ -8,6 +8,7 @@ from torchvision.utils import make_grid
 from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
 
 from pmrf3dsynthesis.models.edm_network import SongUNet, Song3DUNet
+from pmrf3dsynthesis.models.model_jit import JiT_models
 from pmrf3dsynthesis.data import constants as C
 
 import logging
@@ -19,6 +20,7 @@ logging.basicConfig(level=logging.INFO,
                     ])
 
 
+
 class FlowModel(lightning.LightningModule):
 
     def __init__(self, **config: Dict):
@@ -26,22 +28,21 @@ class FlowModel(lightning.LightningModule):
         self.config = OmegaConf.create(config)
         self.save_hyperparameters()
 
+        self.mmse_model = None
         logging.info(f"Model config: {config}")
         self.sigma_data = config.get("sigma_data", 0.5)
         self.sigma_start = config.get("sigma_start", 0.0)
         self.network_name = config.get("network_name", C.SONG_UNET)
         self.t_eps = config.get("t_eps", 5e-2)
         self.map_2d_to_3d = config.get("map_2d_to_3d", False)
-        self.mmse_model = None
 
         if self.network_name == C.SONG_UNET:
             self.network = SongUNet(config.get("image_resolution", 224), config.get("in_channels", 1), config.get("out_channels", 1), model_channels=config.get("model_channels", 64))
         elif self.network_name == C.JIT:
-            from .model_jit import JiT_models
             self.network = JiT_models[config.get('jit_model', 'JiT-B/16')](input_size=config.get("image_resolution", 224))
         elif self.network_name == C.SONG_3DUNET:
             if self.map_2d_to_3d:
-                self.init_projection = torch.nn.Conv2d(1, config.get("slices", 64), kernel_size=1, stride=1, padding=0)
+                self.init_projection = torch.nn.Conv2d(3, config.get("slices", 64), kernel_size=1, stride=1, padding=0)
             
             self.network_3d = Song3DUNet(config.get("image_resolution", 224), config.get("in_channels", 1),
             config.get("out_channels", 1), model_channels=config.get("model_channels", 16))
@@ -53,7 +54,6 @@ class FlowModel(lightning.LightningModule):
             "recon": []
         }
         self.validation_step_outputs = []
-        self.validation_step_segmentation_outputs = []
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
@@ -75,26 +75,31 @@ class FlowModel(lightning.LightningModule):
     def set_mmse_model(self, mmse_model):
         self.mmse_model = mmse_model
 
-    def forward(self, x, T=20):
-        if self.map_2d_to_3d:
-            x = self.init_projection(x).permute(0, 2, 1, 3)[:,None]
+    def forward(self, x, T):
+        with torch.no_grad():
+            if self.map_2d_to_3d:
+                x = self.init_projection(x).permute(0, 2, 1, 3)[:,None]
+            if self.mmse_model is not None:
+                x = self.mmse_model(x)
+                if isinstance(x, list):
+                    x = x[-1]
+                
+                x_orig = x + self.sigma_start * torch.randn_like(x)
+                y_hat = x_orig.clone()
+                for _slice in range(x.shape[2]):
+                    for i in range(T):
+                        test = self.network(y_hat[:, :, _slice, :, :], i / T * torch.ones((1), dtype=torch.float32).to(y_hat.device), torch.zeros((1), dtype=torch.int).to(y_hat.device))
+                        vel = (test - y_hat[:,:, _slice]) /  max((1.0 - i / T), self.t_eps)  
+                        y_hat[:,:,_slice] += 1 / T * vel
 
-        if self.mmse_model is not None:
-            x = self.mmse_model(x)
-            y_hat = x.clone()
-            self.network = self.network  # The diffusion transformer needs to be on cuda or it does not work.
-            for i in range(T):
-                for j in range(y_hat.shape[2]):
-                    test = self.network(y_hat[:,:,j,:,:], i / T * torch.ones((1), dtype=torch.float32).to(y_hat.device), torch.zeros((1), dtype=torch.int).to(y_hat.device))
-                    vel = (test - y_hat[:,:,j,:,:]) /  max((1.0 - i / T), self.t_eps)  
-                    y_hat[:,:,j,:,:] = y_hat[:,:,j,:,:] + 1 / T * vel
-        else:
-            x_orig = x + self.sigma_start * torch.randn_like(x)
-            y_hat = x_orig.clone()
-            for i in range(T):
-                test = self.network(y_hat, i / T * torch.ones((1), dtype=torch.float32).to(y_hat.device), torch.zeros((1), dtype=torch.int).to(y_hat.device))
-            vel = (test - y_hat) /  max((1.0 - i / T), self.t_eps)  
-            y_hat = y_hat + 1 / T * vel
+            else:
+                logging.info("No MMSE model set for FlowModel, passing input directly to flow model.")
+                x_orig = x + self.sigma_start * torch.randn_like(x)
+                y_hat = x_orig.clone()
+                for i in range(T):
+                    test = self.network(y_hat, i / T * torch.ones((1), dtype=torch.float32).to(y_hat.device), torch.zeros((1), dtype=torch.int).to(y_hat.device))
+                    vel = (test - y_hat) /  max((1.0 - i / T), self.t_eps)  
+                    y_hat += 1 / T * vel
         
         return y_hat
 

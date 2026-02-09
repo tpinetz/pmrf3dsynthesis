@@ -1,7 +1,6 @@
 import torch
 from typing import Dict
 import lightning
-
 from omegaconf import OmegaConf
 from torchvision.utils import make_grid
 
@@ -10,7 +9,7 @@ from pmrf3dsynthesis.models.losses.ganloss import GANLoss
 
 from pmrf3dsynthesis.data import constants as C
 from pmrf3dsynthesis.models.edm_network import Song3DUNet
-
+from pmrf3dsynthesis.models.transupnet import TransUpNet
 
 import logging
 
@@ -33,9 +32,12 @@ class MMSEModel(lightning.LightningModule):
         self.network_name = config.get('network_name', C.MODEL_UNETPLUSPLUS)
 
         if self.network_name == C.SONG_3DUNET:
-            self.init_projection = torch.nn.Conv2d(1, config.get("slices", 64), kernel_size=1, stride=1, padding=0)
-            self.network = Song3DUNet(config.get("image_resolution", 224), config.get("in_channels", 1),
+            self.init_projection = torch.nn.Conv2d(config.get("in_channels", 1), config.get("slices", 64), kernel_size=1, stride=1, padding=0)
+            self.network = Song3DUNet(config.get("image_resolution", 224), 1,
             config.get("out_channels", 1), model_channels=config.get("model_channels", 64))
+        elif self.network_name == C.MODEL_TRANSUPNET:
+            self.network = TransUpNet(in_channels=config.get("in_channels", 1),
+                                      slides=config.get("slices", 256))
         else:
             raise NotImplementedError()
         
@@ -49,6 +51,7 @@ class MMSEModel(lightning.LightningModule):
             self.DomainDisc = NLayerDiscriminator(config.get("domain_channels", 1))
             self.pix2pixLoss = GANLoss(gan_mode="lsgan")
             self.automatic_optimization = False
+            self.ganlossweight = self.config.get("ganlossweight", 0.01)
 
         if self.config.get("use_l1_loss", False):
             self.criterion = torch.nn.L1Loss()
@@ -58,7 +61,10 @@ class MMSEModel(lightning.LightningModule):
 
     def configure_optimizers(self):
         if self.use_pixtopix:
-            g_opt = torch.optim.Adam(list(self.network.parameters()) + list(self.init_projection.parameters()), lr=self.config.get("lr_gen", 2e-4))
+            g_parameters = list(self.network.parameters())
+            if self.network_name != C.MODEL_TRANSUPNET:
+                g_parameters += list(self.init_projection.parameters())
+            g_opt = torch.optim.Adam(g_parameters, lr=self.config.get("lr_gen", 2e-4))
             d_opt = torch.optim.Adam(list(self.DomainDisc.parameters()), lr=self.config.get("lr_disc", 2e-4))
             return [g_opt, d_opt]
 
@@ -79,10 +85,11 @@ class MMSEModel(lightning.LightningModule):
         return [optimizer], [scheduler]
 
     def forward(self, x):
-        return self.network(self.init_projection(x).permute(0, 2, 1, 3)[:,None])
-
-    def predict(self, x):
-        return self.network.predict(self.init_projection(x).permute(0, 2, 1, 3)[:,None])
+        if self.network_name == C.MODEL_TRANSUPNET:
+            return self.network(x)
+        else:
+            x_3d = self.init_projection(x).permute(0, 2, 1, 3)[:,None]
+            return self.network(x_3d)
 
     def on_train_start(self):
         self.logger.log_hyperparams(self.hparams)
@@ -94,38 +101,48 @@ class MMSEModel(lightning.LightningModule):
 
     def training_step(self, batch, batch_idx):
         x, y = batch[C.IMAGE], batch[C.TARGET]
+        y_hat = self.forward(x)
 
         if self.network_name == C.MODEL_TRANSUPNET:
-            y_hat = self.network(x)
-            gt = y.clone()
-            loss = 0
-            for i in range(len(y_hat) - 1, -1, -1):
-                loss += self.criterion(y_hat[i], gt)
-                if i > 0:
-                    gt = torch.nn.functional.interpolate(gt, size=y_hat[i - 1].shape[2:], mode='trilinear', align_corners=True)
+            y_hat_list = y_hat
             y_hat = y_hat[-1]
-        else:
-            x_3d = self.init_projection(x).permute(0, 2, 1, 3)[:,None]
-            y_hat = self.network(x_3d)
-            loss = self.criterion(y_hat, y)
+
         if self.config.get("use_pixtopix", False):
             g_opt, d_opt = self.optimizers()
 
             if batch_idx % 2 == 0:
+                if self.network_name == C.MODEL_TRANSUPNET:
+                    gt = y.clone()
+                    loss = 0
+                    for i in range(len(y_hat_list) - 1, -1, -1):
+                        loss += self.criterion(y_hat_list[i], gt)
+                        if i > 0:
+                            gt = torch.nn.functional.interpolate(gt, size=y_hat_list[i - 1].shape[2:], mode='trilinear', align_corners=True)
+                else:
+                    loss = self.criterion(y_hat, y)
                 gan_loss = self.pix2pixLoss(self.DomainDisc(self.to_2dinput(y_hat)), True)
                 self.log("loss/gan_loss_fake", gan_loss.detach())
-                loss += gan_loss
+                loss += self.ganlossweight * gan_loss
                 g_opt.zero_grad()
                 self.manual_backward(loss)
                 g_opt.step()
             else:
-                disc_loss = (self.pix2pixLoss(self.DomainDisc(self.to_2dinput(y_hat.detach())), False) +
+                loss = (self.pix2pixLoss(self.DomainDisc(self.to_2dinput(y_hat.detach())), False) +
                              self.pix2pixLoss(self.DomainDisc(self.to_2dinput(y)), True))
-                self.log("loss/disc_loss", disc_loss.detach())
+                self.log("loss/disc_loss", loss.detach())
                 d_opt.zero_grad()
-                self.manual_backward(disc_loss)
-                d_opt.step() 
-            
+                self.manual_backward(loss)
+                d_opt.step()
+        else:
+            if self.network_name == C.MODEL_TRANSUPNET:
+                gt = y.clone()
+                loss = 0
+                for i in range(len(y_hat_list) - 1, -1, -1):
+                    loss += self.criterion(y_hat_list[i], gt)
+                    if i > 0:
+                        gt = torch.nn.functional.interpolate(gt, size=y_hat_list[i - 1].shape[2:], mode='trilinear', align_corners=True)
+            else:
+                loss = self.criterion(y_hat, y)
 
         self.log("loss/train", loss.detach())
 
@@ -149,13 +166,10 @@ class MMSEModel(lightning.LightningModule):
         x, y = batch[C.IMAGE], batch[C.TARGET]
 
         with torch.no_grad():
+            y_hat = self.forward(x)
 
             if self.network_name == C.MODEL_TRANSUPNET:
-                y_hat = self.network(x)
                 y_hat = y_hat[-1]
-            else:
-                x_3d = self.init_projection(x).permute(0, 2, 1, 3)[:,None]
-                y_hat = self.network(x_3d)
 
             loss = self.criterion(y_hat, y)
 
@@ -183,10 +197,3 @@ class MMSEModel(lightning.LightningModule):
             global_step=self.global_step
         )
         self.validation_step_outputs.clear()
-
-if __name__ == "__main__":
-    model = MMSEModel(network_name=C.SONG_3DUNET)
-
-    x = torch.randn(2, 1, 64, 224, 224)
-    with torch.no_grad():
-        print(model(x).shape)

@@ -26,6 +26,8 @@ def main(res_path: Path, fl_oct_path: Path, model: torch.nn.Module = None):
         x = torch.from_numpy(np.repeat(mip_img[:,None,:], 256, axis=1)[None, None] * 2 - 1)
         with torch.no_grad():
             y_hat = model(x.to('cuda')).detach().cpu().numpy()
+            if isinstance(y_hat, list):
+                y_hat = y_hat[-1]
 
         for fold, scan in zip([res_mmse, res_oct], [y_hat[0,0], orig_oct * 2 - 1]):
             for i, bscan in enumerate(scan):
@@ -35,5 +37,6 @@ if __name__ == '__main__':
     parser = argparse.ArgumentParser()()
     parser.add_argument('res_path', type=Path, help='Path to save results')
     parser.add_argument('fl_oct_path', type=Path, help='Path to save results')
+    parser.add_argument('--model_path', type=Path, required=True, help='Path to the trained model')
     args = parser.parse_args()
     main(Path(args.res_path), Path(args.fl_oct_path))

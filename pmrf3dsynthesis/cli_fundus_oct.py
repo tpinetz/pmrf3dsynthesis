@@ -35,32 +35,15 @@ def resample_rgb(image, reference, transform):
     # 3. Merge them back into one RGB image
     return sitk.Compose(resampled_components)
 
-def process_img(fundus_img: np.ndarray, projection:np.ndarray, fovea: tuple, common_size: int = -1) -> np.ndarray:
-
-    if common_size > 0:
-        fixed_image = resize(projection, (common_size, common_size))  # in case the resolution is known
-
-    fundus_gray = rgb2gray(fundus_img)
-    fixed = sitk.GetImageFromArray((fixed_image - fixed_image.min()) / (fixed_image.max() - fixed_image.min()) * 255.)
-    moving = sitk.GetImageFromArray((fundus_gray - fundus_gray.min()) / (fundus_gray.max() - fundus_gray.min()) * 255.)
-    transform = register_three_stages(fixed, moving, fovea)
-
-
-    moving_img = sitk.Cast(sitk.GetImageFromArray(fundus_img / 255., isVector=True), sitk.sitkVectorFloat32)
-    # Ensure vector image has the same spatial metadata (origin/spacing/direction) as the grayscale image used for registration
-    moving_img.CopyInformation(moving)
-    out = resample_rgb(moving_img, fixed, transform)
-    return sitk.GetArrayFromImage(out) * 255.
-
-
 
 def main(fundus_path: Path, oct_path: Path, res_path: Path, common_size: int = -1):
     res_path.mkdir(exist_ok=True)
     if fundus_path.is_dir():
-        fundus_imgs = list(fundus_path.iterdir())
+        fundus_imgs = [file for file in list(fundus_path.iterdir()) if not (res_path / file.name).exists()]
     else:
         fundus_imgs = [fundus_path]
 
+    print(f'Found {len(fundus_imgs)} files: ', fundus_imgs)
 
     print("Loading model")
     device = "cuda"

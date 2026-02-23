@@ -19,11 +19,11 @@ import pickle
 import logging
 import os
 
-def load_model(model_name, ckpt_path):
+def load_model(model_name, ckpt_path, device):
     if model_name == C.MMSE_MODEL:
-        model = MMSEModel.load_from_checkpoint(ckpt_path)
+        model = MMSEModel.load_from_checkpoint(ckpt_path, map_location=device)
     elif model_name == C.FLOW_MODEL:
-        model = FlowModel.load_from_checkpoint(ckpt_path)
+        model = FlowModel.load_from_checkpoint(ckpt_path, map_location=device)
     else:
         raise ValueError(f"Unknown model name: {model_name}")
     return model
@@ -103,13 +103,13 @@ def run_cli():
     parser.add_argument('--T', type=int, default=20, help='Number of flow steps (if applicable).')
     args = parser.parse_args()
 
-    model = load_model(args.model_name, args.ckpt_path)
+    model = load_model(args.model_name, args.ckpt_path, args.device)
 
     if args.device != 'cpu':
         torch.set_float32_matmul_precision('high')
 
     if args.mmse_path:
-        mmse_model = load_model(C.MMSE_MODEL, args.mmse_path).to(args.device)
+        mmse_model = load_model(C.MMSE_MODEL, args.mmse_path, device=args.device)
         model.set_mmse_model(mmse_model)
 
     model = model.to(args.device)

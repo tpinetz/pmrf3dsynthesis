@@ -80,9 +80,7 @@ class FlowModel(lightning.LightningModule):
             if self.map_2d_to_3d:
                 x = self.init_projection(x).permute(0, 2, 1, 3)[:,None]
             if self.mmse_model is not None:
-                x = self.mmse_model(x)
-                if isinstance(x, list):
-                    x = x[-1]
+                x = self.mmse_model.predict(x)
                 
                 x_orig = x + self.sigma_start * torch.randn_like(x)
                 y_hat = x_orig.clone()

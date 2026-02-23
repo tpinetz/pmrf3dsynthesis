@@ -164,8 +164,8 @@ def register_three_stages(fixed, moving, fovea_point):
 
 def adapt_large_to_small(img_small, img_large, 
                          angle_range=(-10, 10), 
-                         scale_range=(0.9, 1.1), 
-                         steps=15):
+                         scale_range=(0.75, 1.25), 
+                         steps=10):
     """
     Finds the small mask inside the large one, then Warps/Crops the 
     LARGE image to match the geometry of the SMALL image.
@@ -173,8 +173,8 @@ def adapt_large_to_small(img_small, img_large,
     
     # --- PHASE 1: GRID SEARCH (Find where small fits in large) ---
     # We create a list of scales and angles to test
-    scales = np.linspace(scale_range[0], scale_range[1], steps)
-    angles = np.linspace(angle_range[0], angle_range[1], steps)
+    scales = np.linspace(scale_range[0], scale_range[1], 2 * steps + 1)
+    angles = np.linspace(angle_range[0], angle_range[1], steps + 1)
     
     best_score = -1
     best_params = None # Will store (scale, angle, loc_x, loc_y)

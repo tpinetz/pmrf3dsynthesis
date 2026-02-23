@@ -90,6 +90,14 @@ class MMSEModel(lightning.LightningModule):
         else:
             x_3d = self.init_projection(x).permute(0, 2, 1, 3)[:,None]
             return self.network(x_3d)
+    
+    @torch.no_grad()
+    def predict(self, x):
+        self.eval()
+        y_hat = self.forward(x)
+        if isinstance(y_hat, list):
+            y_hat = y_hat[-1]
+        return y_hat
 
     def on_train_start(self):
         self.logger.log_hyperparams(self.hparams)

@@ -1,5 +1,5 @@
-from pmrf3dsynthesis.dmitry_vessel.model import CustomNet, ResidualBlock
-from pmrf3dsynthesis.dmitry_vessel.mytransforms import PadToRate
+from pmrf3dsynthesis.vessel_segmentation.model import CustomNet, ResidualBlock
+from pmrf3dsynthesis.vessel_segmentation.mytransforms import PadToRate
 
 import torch
 import os
@@ -9,7 +9,7 @@ def vessel_model_norm(image):
     return (image - image.mean(axis=(1,2), keepdims=True) + 1) / (image.std(axis=(1,2), keepdims=True) + 1)
 
 
-def extract_vessels_oct_dmitry(pat_oct, ves_model, device='cpu'):
+def extract_vessels_oct(pat_oct, ves_model, device='cpu'):
     pat_oct_for_vessel_model = pat_oct.copy()
     pat_oct_for_vessel_model = vessel_model_norm(pat_oct_for_vessel_model * 2 ** 16)[None]
     

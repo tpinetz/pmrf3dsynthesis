@@ -3,7 +3,7 @@ import torch.nn as nn
 import gc
 import torch.nn.functional as F
 
-from pmrf3dsynthesis.dmitry_vessel import blocks
+from pmrf3dsynthesis.vessel_segmentation import blocks
 
 
 class ResidualBlock(nn.Module):

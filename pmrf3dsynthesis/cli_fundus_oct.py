@@ -11,7 +11,7 @@ from skimage.transform import resize
 import fundus_image_toolbox as fit
 
 from pmrf3dsynthesis.registration.registration import adapt_large_to_small
-from pmrf3dsynthesis.dmitry_vessel.utils import load_model, extract_vessels_oct_dmitry
+from pmrf3dsynthesis.vessel_segmentation.utils import load_model, extract_vessels_oct
 
 logging.basicConfig(level=logging.INFO)
 
@@ -66,7 +66,7 @@ def main(fundus_path: Path, oct_path: Path, res_path: Path, common_size: int = -
 
 
             moving_vessels = fit.ensemble_predict_segmentation(ensemble, [str(fundus_img_path)], threshold=0.5, size=(512, 512)) 
-            fixed_vessels = extract_vessels_oct_dmitry(oct_img, ves_model, device=device)
+            fixed_vessels = extract_vessels_oct(oct_img, ves_model, device=device)
 
 
             if common_size < 0:

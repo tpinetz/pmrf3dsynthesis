@@ -10,7 +10,7 @@ from scipy import ndimage
 from scipy.ndimage.interpolation import map_coordinates
 from scipy.ndimage.filters import gaussian_filter
 
-from pmrf3dsynthesis.dmitry_vessel import loader_helper
+from pmrf3dsynthesis.vessel_segmentation import loader_helper
 
 class Transform:
     def __init__(self, transform_keys:list):

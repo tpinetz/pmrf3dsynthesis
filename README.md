@@ -18,11 +18,27 @@ pip install -e .
 ```
 
 ## Usage
-To run the registration, use the following command:
+
 ```sh
 run-registration --help
 ```
 This will display the help message with all available options for the `run-registration` command.
+
+To run model inference, use:
+```sh
+eval-model --help
+```
+
+```sh
+run-registration --help
+```
+This will display the help message with all available options for the `run-registration` command.
+
+``` 
+eval-model --help
+```
+
+runs model inference for a specific model.
 
 ## Project layout
 - `pmrf3dsynthesis/` — package entrypoints and modules, e.g. `pmrf3dsynthesis/__init__.py`

@@ -5,9 +5,6 @@ pmrf3dsynthesis provides tools to perform Fundus-to-MIP registration and prepare
 ## Features
 - Fundus to MIP registration (CLI) via [`pmrf3dsynthesis.cli_fundus_oct`](pmrf3dsynthesis/cli_fundus_oct.py)
 - Registration logic in [`pmrf3dsynthesis.registration.registration`](pmrf3dsynthesis/registration/registration.py)
-- Example notebooks demonstrating dataset preparation and registration:
-  - [notebooks/PublicFundusOCTDataset.ipynb](notebooks/PublicFundusOCTDataset.ipynb)
-  - [notebooks/TestRegistrationPublicData.ipynb](notebooks/TestRegistrationPublicData.ipynb)
 - Utility scripts such as [scripts/generate_pngs_for_rflow.py](scripts/generate_pngs_for_rflow.py)
 - Project metadata and entry points: [pyproject.toml](pyproject.toml), [pmrf3dsynthesis.egg-info/entry_points.txt](pmrf3dsynthesis.egg-info/entry_points.txt)
 

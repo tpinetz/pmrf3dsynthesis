@@ -32,12 +32,14 @@ class MMSEModel(lightning.LightningModule):
         self.network_name = config.get('network_name', C.MODEL_UNETPLUSPLUS)
 
         if self.network_name == C.SONG_3DUNET:
+            self.ct_transform = config.get("ct_transform", False)
             self.init_projection = torch.nn.Conv2d(config.get("in_channels", 1), config.get("slices", 64), kernel_size=1, stride=1, padding=0)
             self.network = Song3DUNet(config.get("image_resolution", 224), 1,
             config.get("out_channels", 1), model_channels=config.get("model_channels", 64))
         elif self.network_name == C.MODEL_TRANSUPNET:
+            from .transupnet import TransUpNet
             self.network = TransUpNet(in_channels=config.get("in_channels", 1),
-                                      slides=config.get("slices", 256))
+                                      slides=config.get("slices", 256), ct_transform=config.get("ct_transform", False))
         else:
             raise NotImplementedError()
         
@@ -55,6 +57,8 @@ class MMSEModel(lightning.LightningModule):
 
         if self.config.get("use_l1_loss", False):
             self.criterion = torch.nn.L1Loss()
+        elif self.config.get("use_wloss", False):
+            self.criterion = lambda x, y: PatchWiseWasserSteinSinkhorn(x, y, 4, 4)
         else:
             self.criterion = torch.nn.MSELoss()
 
@@ -88,7 +92,10 @@ class MMSEModel(lightning.LightningModule):
         if self.network_name == C.MODEL_TRANSUPNET:
             return self.network(x)
         else:
-            x_3d = self.init_projection(x).permute(0, 2, 1, 3)[:,None]
+            if self.ct_transform:
+                x_3d = self.init_projection(x)[:, None]
+            else:
+                x_3d = self.init_projection(x).permute(0, 2, 1, 3)[:,None]
             return self.network(x_3d)
     
     @torch.no_grad()
@@ -114,7 +121,7 @@ class MMSEModel(lightning.LightningModule):
         if self.network_name == C.MODEL_TRANSUPNET:
             y_hat_list = y_hat
             y_hat = y_hat[-1]
-
+        
         if self.config.get("use_pixtopix", False):
             g_opt, d_opt = self.optimizers()
 
@@ -172,7 +179,7 @@ class MMSEModel(lightning.LightningModule):
 
     def validation_step(self, batch, batch_idx):
         x, y = batch[C.IMAGE], batch[C.TARGET]
-
+        
         with torch.no_grad():
             y_hat = self.forward(x)
 

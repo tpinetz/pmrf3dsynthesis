@@ -35,6 +35,7 @@ class FlowModel(lightning.LightningModule):
         self.network_name = config.get("network_name", C.SONG_UNET)
         self.t_eps = config.get("t_eps", 5e-2)
         self.map_2d_to_3d = config.get("map_2d_to_3d", False)
+        self.ct_transform = config.get("ct_transform", False)
 
         if self.network_name == C.SONG_UNET:
             self.network = SongUNet(config.get("image_resolution", 224), config.get("in_channels", 1), config.get("out_channels", 1), model_channels=config.get("model_channels", 64))
@@ -42,7 +43,7 @@ class FlowModel(lightning.LightningModule):
             self.network = JiT_models[config.get('jit_model', 'JiT-B/16')](input_size=config.get("image_resolution", 224))
         elif self.network_name == C.SONG_3DUNET:
             if self.map_2d_to_3d:
-                self.init_projection = torch.nn.Conv2d(3, config.get("slices", 64), kernel_size=1, stride=1, padding=0)
+                self.init_projection = torch.nn.Conv2d(1 if self.ct_transform else 3, config.get("slices", 64), kernel_size=1, stride=1, padding=0)
             
             self.network_3d = Song3DUNet(config.get("image_resolution", 224), config.get("in_channels", 1),
             config.get("out_channels", 1), model_channels=config.get("model_channels", 16))
@@ -54,6 +55,7 @@ class FlowModel(lightning.LightningModule):
             "recon": []
         }
         self.validation_step_outputs = []
+        self.validation_step_segmentation_outputs = []
 
     def configure_optimizers(self):
         optimizer = torch.optim.AdamW(
@@ -75,14 +77,33 @@ class FlowModel(lightning.LightningModule):
     def set_mmse_model(self, mmse_model):
         self.mmse_model = mmse_model
 
-    def forward(self, x, T):
+    def forward(self, x, T, noise_type=C.NOISE_TYPE_NORMAL):
         with torch.no_grad():
             if self.map_2d_to_3d:
                 x = self.init_projection(x).permute(0, 2, 1, 3)[:,None]
             if self.mmse_model is not None:
                 x = self.mmse_model.predict(x)
-                
-                x_orig = x + self.sigma_start * torch.randn_like(x)
+
+                if noise_type == C.NOISE_TYPE_NORMAL:
+                    noise = torch.randn_like(x)
+                elif noise_type == C.NOISE_TYPE_CONSTANT:
+                    noise = torch.randn_like(x)[:,:,0:1,:,:].expand(-1,-1,x.shape[2],-1,-1)
+                elif noise_type == C.NOISE_TYPE_SLERM:
+                    eps = 1e-8
+                    z0 = torch.randn_like(x[:,0,0])
+                    z1 = torch.randn_like(x[:,0,0])
+                    alphas = torch.linspace(0, 1, x.shape[2]).to(x.device)
+
+                    z0_flat = z0.reshape(-1)
+                    z1_flat = z1.reshape(-1)
+                    omega = torch.acos(torch.clamp(torch.dot(z0_flat, z1_flat) / (z0_flat.norm() * z1_flat.norm() + eps), -1.0 + 1e-7, 1.0 - 1e-7)) 
+                    sin_omega = torch.sin(omega)
+                    w1 = torch.sin((1 - alphas) * omega) / (sin_omega + eps)
+                    w2 = torch.sin(alphas * omega) / (sin_omega + eps)
+                    noise = (w1.unsqueeze(-1).unsqueeze(-1).unsqueeze(0) * z0 +
+                             w2.unsqueeze(-1).unsqueeze(-1).unsqueeze(0) * z1).unsqueeze(1)
+
+                x_orig = x + self.sigma_start * noise
                 y_hat = x_orig.clone()
                 for _slice in range(x.shape[2]):
                     for i in range(T):
@@ -116,7 +137,10 @@ class FlowModel(lightning.LightningModule):
     def training_step(self, batch, batch_idx):
         x, y = batch[C.IMAGE], batch[C.TARGET]
         if self.map_2d_to_3d:
-            x = self.init_projection(x).permute(0, 2, 1, 3)[:,None]
+            if self.ct_transform:
+                x = self.init_projection(x)[:,None]
+            else:
+                x = self.init_projection(x).permute(0, 2, 1, 3)[:,None]
         if x.ndim == 4:
             t = torch.rand(x.shape[0], device=x.device).view(-1, 1, 1, 1)
         elif x.ndim == 5:
@@ -161,7 +185,10 @@ class FlowModel(lightning.LightningModule):
 
 
         if self.map_2d_to_3d and x.ndim == 4:
-            x = self.init_projection(x).permute(0, 2, 1, 3)[:,None]
+            if self.ct_transform:
+                x = self.init_projection(x)[:,None]
+            else:
+                x = self.init_projection(x).permute(0, 2, 1, 3)[:,None]
 
         if batch_idx < 10:
             with torch.no_grad():

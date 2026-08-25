@@ -31,3 +31,7 @@ STUDY_APENNINES = "APENNINES"
 
 MMSE_MODEL = "mmse_model"
 FLOW_MODEL = "flow_model"
+
+NOISE_TYPE_NORMAL = "normal"
+NOISE_TYPE_CONSTANT = "constant"
+NOISE_TYPE_SLERM = "slerm"

@@ -3,7 +3,6 @@ import torch.nn as nn
 from pmrf3dsynthesis.models.transunet import PretrainedViTNeck
 import torch.nn.functional as F
 
-
 class DecoderBlock(nn.Module):
     def __init__(self, in_channels, skip_channels, out_channels):
         super().__init__()
@@ -38,9 +37,9 @@ class DecoderBlock(nn.Module):
 
 class TransUpNet(nn.Module):
     def __init__(self, in_channels=1, kernel_size=8, c_hat=12, num_resolution=3,
-                 slides=256):
+                 slides=256, ct_transform=False):
         super().__init__()
-        
+        self.ct_transform = ct_transform
         self.patch_extract = nn.Conv2d(in_channels=in_channels, out_channels=c_hat * (kernel_size ** 2),
                                        kernel_size=kernel_size, stride=kernel_size)
         
@@ -69,8 +68,11 @@ class TransUpNet(nn.Module):
 
         depth = self.slides // (2 ** self.num_resolution)
         channels = enc_out.shape[1] // depth
-        # H in fundus is depth in oct
-        dec_input = enc_out.view(B, channels, depth, H // 8, W // 8).transpose(2, 3)
+        if self.ct_transform:
+            dec_input = enc_out.view(B, channels, depth, H // 8, W // 8)
+        else:
+            # H in fundus is depth in oct
+            dec_input = enc_out.view(B, channels, depth, H // 8, W // 8).transpose(2, 3)
 
         predictions = [self.init_head(dec_input)]
         x_cur = dec_input

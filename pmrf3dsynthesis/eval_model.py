@@ -474,7 +474,7 @@ def run_cli():
     parser.add_argument('--device', type=str, default='cpu', help='Device to run the evaluation on (e.g. cuda, cpu).')
     parser.add_argument('--T', type=int, default=20, help='Number of flow steps (for FlowModel).')
     parser.add_argument('--modality', type=str, choices=[C.MODALITY_OCT, C.MODALITY_CT], default=C.MODALITY_OCT, help='Modality to evaluate on (oct or ct).')
-    parser.add_argument('--noise_type', type=str, choices=[C.NOISE_TYPE_NORMAL, C.NOISE_TYPE_CONSTANT, C.NOISE_TYPE_SLERM], default=C.NOISE_TYPE_NORMAL, help='Type of noise to apply.')
+    parser.add_argument('--noise_type', type=str, choices=[C.NOISE_TYPE_NORMAL, C.NOISE_TYPE_CONSTANT, C.NOISE_TYPE_SLERP], default=C.NOISE_TYPE_NORMAL, help='Type of noise to apply.')
 
     # Custom path and format arguments
     parser.add_argument('--vol_path', type=str, default=None, help='Custom path to ground truth 3D volume directory.')

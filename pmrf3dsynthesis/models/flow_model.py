@@ -88,7 +88,7 @@ class FlowModel(lightning.LightningModule):
                     noise = torch.randn_like(x)
                 elif noise_type == C.NOISE_TYPE_CONSTANT:
                     noise = torch.randn_like(x)[:,:,0:1,:,:].expand(-1,-1,x.shape[2],-1,-1)
-                elif noise_type == C.NOISE_TYPE_SLERM:
+                elif noise_type == C.NOISE_TYPE_SLERP:
                     eps = 1e-8
                     z0 = torch.randn_like(x[:,0,0])
                     z1 = torch.randn_like(x[:,0,0])

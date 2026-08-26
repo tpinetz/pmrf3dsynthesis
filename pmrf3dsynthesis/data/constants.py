@@ -34,7 +34,7 @@ FLOW_MODEL = "flow_model"
 
 NOISE_TYPE_NORMAL = "normal"
 NOISE_TYPE_CONSTANT = "constant"
-NOISE_TYPE_SLERM = "slerm"
+NOISE_TYPE_SLERP = "slerp"
 
 MODALITY_OCT = "oct"
 MODALITY_CT = "ct"

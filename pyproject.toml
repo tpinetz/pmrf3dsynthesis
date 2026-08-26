@@ -14,6 +14,7 @@ dynamic = ["dependencies"]
 # command-name = "package.module:function_name"
 run-registration = "pmrf3dsynthesis.cli_fundus_oct:run_cli"
 eval-model = "pmrf3dsynthesis.eval_model:run_cli"
+view-eval = "pmrf3dsynthesis.visualize_eval:run_cli"
 
 [tool.setuptools.packages.find]
 where = ["."]

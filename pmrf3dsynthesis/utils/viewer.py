@@ -9,7 +9,9 @@ import ipywidgets as widgets
 from IPython.display import display
 
 
-__all__ = ['SliceViewer']
+from pmrf3dsynthesis.visualize_eval import EvaluationViewer
+
+__all__ = ['SliceViewer', 'EvaluationViewer']
 
 
 def xaligned_axes(ax, y_distance, width, **kwargs):

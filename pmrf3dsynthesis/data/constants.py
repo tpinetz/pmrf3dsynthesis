@@ -35,3 +35,11 @@ FLOW_MODEL = "flow_model"
 NOISE_TYPE_NORMAL = "normal"
 NOISE_TYPE_CONSTANT = "constant"
 NOISE_TYPE_SLERM = "slerm"
+
+MODALITY_OCT = "oct"
+MODALITY_CT = "ct"
+
+FORMAT_AUTO = "auto"
+FORMAT_NII = "nii"
+FORMAT_H5 = "h5"
+FORMAT_NPY = "npy"

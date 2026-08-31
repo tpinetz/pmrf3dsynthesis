@@ -2,6 +2,17 @@
 
 pmrf3dsynthesis provides tools to perform Fundus-to-MIP registration and prepare inputs for a 3D synthesis pipeline.
 
+## Example GIFS
+
+### OCT
+
+![hippo](./assets/test_case_oct.gif)
+
+### CT
+
+![hippo](./assets/test_case_ct.gif)
+
+
 ## Features
 - Fundus to MIP registration (CLI) via [`pmrf3dsynthesis.cli_fundus_oct`](pmrf3dsynthesis/cli_fundus_oct.py)
 - Registration logic in [`pmrf3dsynthesis.registration.registration`](pmrf3dsynthesis/registration/registration.py)

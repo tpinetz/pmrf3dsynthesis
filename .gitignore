@@ -234,3 +234,5 @@ results/*
 *.sif
 
 scripts/torchinductor*
+assets/*
+scratch/*

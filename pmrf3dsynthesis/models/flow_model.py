@@ -9,6 +9,7 @@ from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
 
 from pmrf3dsynthesis.models.edm_network import SongUNet, Song3DUNet
 from pmrf3dsynthesis.models.model_jit import JiT_models
+from pmrf3dsynthesis.models.slice_noise import make_slice_noise
 from pmrf3dsynthesis.data import constants as C
 
 import logging
@@ -77,31 +78,22 @@ class FlowModel(lightning.LightningModule):
     def set_mmse_model(self, mmse_model):
         self.mmse_model = mmse_model
 
-    def forward(self, x, T, noise_type=C.NOISE_TYPE_NORMAL):
+    def forward(self, x, T, noise_type=C.NOISE_TYPE_NORMAL, noise=None, generator=None, return_mmse=False):
         with torch.no_grad():
             if self.map_2d_to_3d:
                 x = self.init_projection(x).permute(0, 2, 1, 3)[:,None]
             if self.mmse_model is not None:
                 x = self.mmse_model.predict(x)
+                mmse_pred = x.clone()
 
-                if noise_type == C.NOISE_TYPE_NORMAL:
-                    noise = torch.randn_like(x)
-                elif noise_type == C.NOISE_TYPE_CONSTANT:
-                    noise = torch.randn_like(x)[:,:,0:1,:,:].expand(-1,-1,x.shape[2],-1,-1)
-                elif noise_type == C.NOISE_TYPE_SLERP:
-                    eps = 1e-8
-                    z0 = torch.randn_like(x[:,0,0])
-                    z1 = torch.randn_like(x[:,0,0])
-                    alphas = torch.linspace(0, 1, x.shape[2]).to(x.device)
-
-                    z0_flat = z0.reshape(-1)
-                    z1_flat = z1.reshape(-1)
-                    omega = torch.acos(torch.clamp(torch.dot(z0_flat, z1_flat) / (z0_flat.norm() * z1_flat.norm() + eps), -1.0 + 1e-7, 1.0 - 1e-7)) 
-                    sin_omega = torch.sin(omega)
-                    w1 = torch.sin((1 - alphas) * omega) / (sin_omega + eps)
-                    w2 = torch.sin(alphas * omega) / (sin_omega + eps)
-                    noise = (w1.unsqueeze(-1).unsqueeze(-1).unsqueeze(0) * z0 +
-                             w2.unsqueeze(-1).unsqueeze(-1).unsqueeze(0) * z1).unsqueeze(1)
+                if noise is None:
+                    noise = make_slice_noise(
+                        noise_type=noise_type,
+                        shape=x.shape,
+                        generator=generator,
+                        device=x.device,
+                        dtype=x.dtype
+                    )
 
                 x_orig = x + self.sigma_start * noise
                 y_hat = x_orig.clone()
@@ -111,16 +103,24 @@ class FlowModel(lightning.LightningModule):
                         vel = (test - y_hat[:,:, _slice]) /  max((1.0 - i / T), self.t_eps)  
                         y_hat[:,:,_slice] += 1 / T * vel
 
+                if return_mmse:
+                    return y_hat, mmse_pred
+                return y_hat
+
             else:
                 logging.info("No MMSE model set for FlowModel, passing input directly to flow model.")
-                x_orig = x + self.sigma_start * torch.randn_like(x)
+                if noise is None:
+                    noise = torch.randn_like(x)
+                x_orig = x + self.sigma_start * noise
                 y_hat = x_orig.clone()
                 for i in range(T):
                     test = self.network(y_hat, i / T * torch.ones((1), dtype=torch.float32).to(y_hat.device), torch.zeros((1), dtype=torch.int).to(y_hat.device))
                     vel = (test - y_hat) /  max((1.0 - i / T), self.t_eps)  
                     y_hat += 1 / T * vel
-        
-        return y_hat
+
+                if return_mmse:
+                    return y_hat, x
+                return y_hat
 
     def on_train_start(self):
         self.logger.log_hyperparams(self.hparams)

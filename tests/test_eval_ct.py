@@ -4,7 +4,12 @@ import unittest
 from pathlib import Path
 import numpy as np
 import torch
-import h5py
+try:
+    import h5py
+    HAS_H5PY = True
+except ImportError:
+    HAS_H5PY = False
+    h5py = None
 import pandas as pd
 import imageio.v3 as iio
 
@@ -15,6 +20,8 @@ from pmrf3dsynthesis.eval_model import load_dataset, load_sample, slice_volume_s
 class TestEvalModelCT(unittest.TestCase):
 
     def setUp(self):
+        if not HAS_H5PY:
+            self.skipTest("h5py is not installed")
         self.temp_dir = tempfile.TemporaryDirectory()
         self.root = Path(self.temp_dir.name)
 

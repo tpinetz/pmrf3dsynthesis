@@ -119,6 +119,34 @@ class EvaluationViewer:
         auto_keys, self.psnr_dict, self.ssim_dict, self.fid = load_evaluation_cases(self.primary_path)
         self.keys = keys if keys is not None else auto_keys
 
+        # Load vessel dice, lpips, sdif if available
+        self.vessel_dice_dict = {}
+        self.lpips_dict = {}
+        self.sdif_dict = {}
+        pkl_file = self.primary_path / "eval_results.pkl"
+        csv_file = self.primary_path / "eval_results.csv"
+        if pkl_file.exists():
+            try:
+                with open(pkl_file, "rb") as f:
+                    data = pickle.load(f)
+                    self.vessel_dice_dict = data.get("Vessel_Dice", {})
+                    self.lpips_dict = data.get("LPIPS", {})
+                    self.sdif_dict = data.get("SDIF", {})
+            except Exception:
+                pass
+        elif csv_file.exists():
+            try:
+                df = pd.read_csv(csv_file)
+                df_cases = df[~df["Key"].isin(["MEAN", "STD", "FID"])].dropna(subset=["Key"])
+                if "Vessel_Dice" in df_cases.columns:
+                    self.vessel_dice_dict = dict(zip(df_cases["Key"].astype(str), df_cases["Vessel_Dice"].astype(float)))
+                if "LPIPS" in df_cases.columns:
+                    self.lpips_dict = dict(zip(df_cases["Key"].astype(str), df_cases["LPIPS"].astype(float)))
+                if "SDIF" in df_cases.columns:
+                    self.sdif_dict = dict(zip(df_cases["Key"].astype(str), df_cases["SDIF"].astype(float)))
+            except Exception:
+                pass
+
         if not self.keys:
             raise ValueError(f"No cases found in {self.primary_path}. Please check path.")
 
@@ -147,6 +175,18 @@ class EvaluationViewer:
             self.keys = sorted(self.keys, key=lambda k: self.ssim_dict.get(k, float("inf")))
         elif mode == "ssim_desc":
             self.keys = sorted(self.keys, key=lambda k: self.ssim_dict.get(k, -float("inf")), reverse=True)
+        elif mode == "lpips_asc":
+            self.keys = sorted(self.keys, key=lambda k: self.lpips_dict.get(k, float("inf")))
+        elif mode == "lpips_desc":
+            self.keys = sorted(self.keys, key=lambda k: self.lpips_dict.get(k, -float("inf")), reverse=True)
+        elif mode == "sdif_asc":
+            self.keys = sorted(self.keys, key=lambda k: self.sdif_dict.get(k, float("inf")))
+        elif mode == "sdif_desc":
+            self.keys = sorted(self.keys, key=lambda k: self.sdif_dict.get(k, -float("inf")), reverse=True)
+        elif mode == "vessel_asc":
+            self.keys = sorted(self.keys, key=lambda k: self.vessel_dice_dict.get(k, float("inf")))
+        elif mode == "vessel_desc":
+            self.keys = sorted(self.keys, key=lambda k: self.vessel_dice_dict.get(k, -float("inf")), reverse=True)
 
     def _load_current_case_data(self):
         self.current_key = self.keys[self.current_case_idx]
@@ -332,12 +372,21 @@ class EvaluationViewer:
             key = self.current_key
             psnr_val = self.psnr_dict.get(key, None)
             ssim_val = self.ssim_dict.get(key, None)
+            lpips_val = self.lpips_dict.get(key, None)
+            sdif_val = self.sdif_dict.get(key, None)
+            vessel_val = self.vessel_dice_dict.get(key, None)
 
             metrics_str = ""
             if psnr_val is not None:
                 metrics_str += f" | PSNR: {psnr_val:.2f} dB"
             if ssim_val is not None:
                 metrics_str += f" | SSIM: {ssim_val:.4f}"
+            if lpips_val is not None:
+                metrics_str += f" | LPIPS: {lpips_val:.4f}"
+            if sdif_val is not None:
+                metrics_str += f" | SDIF: {sdif_val:.6f}"
+            if vessel_val is not None:
+                metrics_str += f" | Vessel Dice: {vessel_val:.3f}"
 
             plane_str = plane_names[self.slice_axis]
             fig.suptitle(
@@ -481,6 +530,8 @@ class EvaluationViewer:
                 slider.ax.set_xlim(0, max_sl)
                 slider.set_val(min(self.current_slice_idx, max_sl))
                 update_views()
+            elif event.key in ["v", "V"]:
+                self.show_vessel_comparison()
 
         def on_scroll(event):
             step = 1 if event.button == "up" else -1
@@ -491,6 +542,42 @@ class EvaluationViewer:
         fig.canvas.mpl_connect("scroll_event", on_scroll)
 
         update_header()
+        plt.show()
+
+    def show_vessel_comparison(self):
+        """Displays 2D vessel segmentation maps (GT vs Prediction) for current case."""
+        vessels_dir = self.primary_path / "vessels"
+        pred_ves_file = vessels_dir / f"{self.current_key}_pred_vessels.npy"
+        gt_ves_file = vessels_dir / f"{self.current_key}_gt_vessels.npy"
+
+        if not pred_ves_file.exists() and not gt_ves_file.exists():
+            print(f"No vessel maps found for {self.current_key} in {vessels_dir}. Run eval-model with --save_vessels.")
+            return
+
+        pred_ves = np.load(pred_ves_file) if pred_ves_file.exists() else None
+        gt_ves = np.load(gt_ves_file) if gt_ves_file.exists() else None
+
+        fig, axes = plt.subplots(1, 3, figsize=(14, 5))
+        if gt_ves is not None:
+            axes[0].imshow(gt_ves, cmap="gray", vmin=0, vmax=1)
+            axes[0].set_title(f"GT 2D Vessel Map\n{gt_ves.shape}", fontsize=10)
+        axes[0].axis("off")
+
+        if pred_ves is not None:
+            axes[1].imshow(pred_ves, cmap="gray", vmin=0, vmax=1)
+            axes[1].set_title(f"Pred 2D Vessel Map\n{pred_ves.shape}", fontsize=10)
+        axes[1].axis("off")
+
+        if pred_ves is not None and gt_ves is not None:
+            diff = np.abs(pred_ves - gt_ves)
+            axes[2].imshow(diff, cmap="magma", vmin=0, vmax=0.5)
+            dice_val = self.vessel_dice_dict.get(self.current_key, None)
+            dice_str = f" | Dice: {dice_val:.4f}" if dice_val is not None else ""
+            axes[2].set_title(f"|Pred - GT| Difference{dice_str}", fontsize=10)
+        axes[2].axis("off")
+
+        fig.suptitle(f"2D Vessel Segmentation: {self.current_key}", fontsize=12, fontweight="bold")
+        plt.tight_layout()
         plt.show()
 
     # -------------------------------------------------------------
@@ -600,7 +687,8 @@ class EvaluationViewer:
                 k = self.current_key
                 psnr_str = f" | PSNR: {self.psnr_dict[k]:.2f} dB" if k in self.psnr_dict else ""
                 ssim_str = f" | SSIM: {self.ssim_dict[k]:.4f}" if k in self.ssim_dict else ""
-                fig.suptitle(f"[{self.current_case_idx + 1}/{len(self.keys)}] {k}{psnr_str}{ssim_str} (Slice {self.current_slice_idx}/{self._get_num_slices()-1})", fontsize=11, fontweight="bold")
+                vessel_str = f" | Vessel Dice: {self.vessel_dice_dict[k]:.3f}" if k in self.vessel_dice_dict else ""
+                fig.suptitle(f"[{self.current_case_idx + 1}/{len(self.keys)}] {k}{psnr_str}{ssim_str}{vessel_str} (Slice {self.current_slice_idx}/{self._get_num_slices()-1})", fontsize=11, fontweight="bold")
                 plt.tight_layout()
                 plt.show()
 
@@ -679,7 +767,7 @@ def run_cli():
     parser.add_argument("--img_path", type=str, default=None, help="Custom 2D input image path.")
     parser.add_argument("--data_dir", type=str, default=None, help="Base dataset directory.")
     parser.add_argument("--data_format", type=str, choices=[C.FORMAT_AUTO, C.FORMAT_NII, C.FORMAT_H5, C.FORMAT_NPY], default=C.FORMAT_AUTO, help="Data format.")
-    parser.add_argument("--sort_by", type=str, choices=["none", "psnr_asc", "psnr_desc", "ssim_asc", "ssim_desc"], default="none", help="Sort cases by metrics.")
+    parser.add_argument("--sort_by", type=str, choices=["none", "psnr_asc", "psnr_desc", "ssim_asc", "ssim_desc", "vessel_asc", "vessel_desc"], default="none", help="Sort cases by metrics.")
     parser.add_argument("--no_diff", action="store_true", help="Disable difference map panel.")
 
     args = parser.parse_args()

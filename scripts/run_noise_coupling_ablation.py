@@ -39,6 +39,7 @@ from pmrf3dsynthesis.models.mmse_model import MMSEModel
 from pmrf3dsynthesis.models.slice_noise import draw_slice_endpoints, make_slice_noise
 from pmrf3dsynthesis.evaluation.ssim import SSIM3D
 from pmrf3dsynthesis.evaluation.retfound_fid import RETFoundFeatureExtractor
+from pmrf3dsynthesis.evaluation.radimagenet_fid import RadImageNetFeatureExtractor
 from pmrf3dsynthesis.evaluation.interslice import (
     evaluate_interslice_structure,
     compute_lag_ssim_comparison,
@@ -112,6 +113,7 @@ def run_ablation(args):
     device = args.device
     if device != 'cpu' and torch.cuda.is_available():
         torch.set_float32_matmul_precision('high')
+        torch.backends.cudnn.benchmark = True
 
     logging.info(f"Using device: {device}")
     out_dir = Path(args.res_path)
@@ -146,19 +148,27 @@ def run_ablation(args):
     logging.info(f"Total evaluation cases: {len(keys)}")
 
     # 4. Initialize evaluation metric modules
-    psnr_metric = PeakSignalNoiseRatio(data_range=1.0).to(device)
-    ssim_metric = SSIM3D().to(device)
-    lpips_fn = LearnedPerceptualImagePatchSimilarity(net_type='alex', normalize=True).to(device).eval()
-    ves_model = load_vessel_model().to(device).eval() if args.eval_vessels else None
+    psnr_metric = PeakSignalNoiseRatio(data_range=1.0).to(device) if not args.sdif_fid_only else None
+    ssim_metric = SSIM3D().to(device) if not args.sdif_fid_only else None
+    lpips_fn = (
+        LearnedPerceptualImagePatchSimilarity(net_type='alex', normalize=True).to(device).eval()
+        if not args.sdif_fid_only else None
+    )
+    ves_model = load_vessel_model().to(device).eval() if (args.eval_vessels and not args.sdif_fid_only) else None
 
-    # Single shared RETFound feature extractor for FID (avoids duplicating 5+ ViT backbones on GPU)
+    # Single shared feature extractor for FID (RETFound for OCT, RadImageNet for CT)
     feature_extractor = None
     if not args.no_fid:
-        logging.info("Initializing single shared RETFound feature extractor for OCT FID...")
-        feature_extractor = RETFoundFeatureExtractor().to(device).eval()
+        if args.modality == C.MODALITY_OCT:
+            logging.info("Initializing single shared RETFound feature extractor for OCT FID...")
+            feature_extractor = RETFoundFeatureExtractor().to(device).eval()
+        else:
+            logging.info("Initializing single shared RadImageNet feature extractor for CT FID...")
+            feature_extractor = RadImageNetFeatureExtractor(checkpoint_path=args.radimagenet_path).to(device).eval()
 
     arms = args.arms
     seeds = args.seeds
+    logging.info(f"Modality: {args.modality.upper()}")
     logging.info(f"Ablation arms: {arms}")
     logging.info(f"Random seeds: {seeds}")
 
@@ -172,19 +182,48 @@ def run_ablation(args):
     gt_features_list = []
     arm_features = {arm: {s: [] for s in seeds} for arm in arms}
 
+    # Check if existing partial results exist to support resuming
+    results_file = out_dir / "ablation_results_raw.pkl"
+    if results_file.exists():
+        try:
+            with open(results_file, "rb") as f:
+                saved_results = pickle.load(f)
+            if set(saved_results.keys()) == set(arms):
+                all_results = saved_results
+                logging.info(f"Loaded existing results from {results_file} for resuming.")
+        except Exception as e:
+            logging.warning(f"Could not load existing results for resuming: {e}")
+
     vol_path = Path(args.vol_path) if args.vol_path else None
     img_path = Path(args.img_path) if args.img_path else None
+    data_dir = Path(args.data_dir) if args.data_dir else None
 
     start_time = time.time()
 
     # Evaluation loop
-    for case_idx, key in enumerate(tqdm(keys, desc="Processing cases")):
-        # Load input fundus and GT volume
+    for case_idx, key in enumerate(tqdm(keys, desc=f"Processing {args.modality.upper()} cases")):
+        # Check if already computed for all arms and seeds
+        check_metric = "SDIF" if args.sdif_fid_only else "SSIM"
+        already_done = True
+        for arm in arms:
+            for s in seeds:
+                if key not in all_results.get(arm, {}).get(s, {}).get(check_metric, {}):
+                    already_done = False
+                    break
+            if not already_done:
+                break
+        if already_done:
+            logging.info(f"Case {key} already evaluated. Skipping.")
+            continue
+        # Load input 2D image and GT volume
         in_img, gt_vol = load_sample(
             key=key,
-            modality="oct",
+            modality=args.modality,
             vol_path=vol_path,
-            img_path=img_path
+            img_path=img_path,
+            data_dir=data_dir,
+            data_format=args.data_format,
+            target_vol_shape=(128, 256, 256) if args.modality == C.MODALITY_CT else None
         )
         gt_t = torch.from_numpy(gt_vol[None, None]).float().to(device)
         gt_01 = torch.clamp(gt_t, 0.0, 1.0)
@@ -194,11 +233,22 @@ def run_ablation(args):
         cached_file = mmse_cache_dir / f"{key}.npy" if mmse_cache_dir else None
         if cached_file and cached_file.exists():
             mmse_raw = np.load(cached_file)
-            if mmse_raw.shape != (128, 256, 256):
-                mmse_raw = resize(mmse_raw, (128, 256, 256))
+            if mmse_raw.shape != gt_vol.shape:
+                mmse_raw = resize(mmse_raw, gt_vol.shape)
             x_mmse = torch.from_numpy(mmse_raw[None, None]).float().to(device)
         else:
-            in_t = torch.from_numpy(in_img.transpose((2, 0, 1))[None] * 2.0 - 1.0).float().to(device)
+            if in_img.ndim == 2:
+                in_t = torch.from_numpy(in_img[None, None] * 2.0 - 1.0).float().to(device)
+            elif in_img.ndim == 3:
+                if in_img.shape[2] in [1, 3]:
+                    in_t = torch.from_numpy(in_img.transpose((2, 0, 1))[None] * 2.0 - 1.0).float().to(device)
+                elif in_img.shape[0] in [1, 3]:
+                    in_t = torch.from_numpy(in_img[None] * 2.0 - 1.0).float().to(device)
+                else:
+                    in_t = torch.from_numpy(in_img[None, None] * 2.0 - 1.0).float().to(device)
+            else:
+                raise ValueError(f"Unexpected in_img shape: {in_img.shape}")
+
             with torch.no_grad():
                 x_mmse = mmse_model.predict(in_t)
                 if isinstance(x_mmse, list):
@@ -261,47 +311,53 @@ def run_ablation(args):
                 pred_01 = torch.clamp(y_hat * 0.5 + 0.5, 0.0, 1.0)
                 pred_np_01 = pred_01.cpu().numpy()[0, 0]
 
-                # Compute standard in-plane metrics
-                psnr_val = float(psnr_metric(pred_01, gt_01).item())
-                ssim_val = float(ssim_metric(pred_01, gt_01).item())
-                lpips_val = float(compute_volume_lpips(pred_np_01, gt_np_01, lpips_fn, device=device))
+                # Compute SDIF (fast slice-difference gap)
                 sdif_val = float(compute_sdif(pred_np_01, gt_np_01)["SDIF"])
-
-                all_results[arm][seed_val]["PSNR"][key] = psnr_val
-                all_results[arm][seed_val]["SSIM"][key] = ssim_val
-                all_results[arm][seed_val]["LPIPS"][key] = lpips_val
                 all_results[arm][seed_val]["SDIF"][key] = sdif_val
 
-                # Vessel segmentation metrics (OCT)
-                if ves_model is not None:
-                    p_ves = extract_vessels_oct(pred_np_01, ves_model, device=device)
-                    g_ves = extract_vessels_oct(gt_np_01, ves_model, device=device)
-                    v_mets = compute_vessel_metrics(p_ves, g_ves)
-                    all_results[arm][seed_val]["Vessel_Dice"][key] = v_mets["Vessel_Dice"]
+                if not args.sdif_fid_only:
+                    # Compute standard in-plane metrics
+                    psnr_val = float(psnr_metric(pred_01, gt_01).item())
+                    ssim_val = float(ssim_metric(pred_01, gt_01).item())
+                    lpips_val = float(compute_volume_lpips(pred_np_01, gt_np_01, lpips_fn, device=device))
 
-                # Inter-slice structural metrics
-                mmse_np_01 = np.clip(x_mmse.cpu().numpy()[0, 0], 0.0, 1.0)
-                is_metrics = evaluate_interslice_structure(
-                    pred=pred_np_01,
-                    gt=gt_np_01,
-                    mmse_pred=mmse_np_01,
-                    lpips_fn=lpips_fn,
-                    device=device
-                )
+                    all_results[arm][seed_val]["PSNR"][key] = psnr_val
+                    all_results[arm][seed_val]["SSIM"][key] = ssim_val
+                    all_results[arm][seed_val]["LPIPS"][key] = lpips_val
 
-                all_results[arm][seed_val]["Adjacent_SSIM_Gap"][key] = is_metrics["Adjacent_SSIM_Gap"]
-                all_results[arm][seed_val]["Log_Spectral_Distance"][key] = is_metrics["Log_Spectral_Distance"]
-                all_results[arm][seed_val]["Orthogonal_SSIM_mean"][key] = is_metrics["Orthogonal_SSIM_mean"]
-                all_results[arm][seed_val]["Orthogonal_LPIPS_mean"][key] = is_metrics["Orthogonal_LPIPS_mean"]
-                all_results[arm][seed_val]["Flow_Displacement_L1"][key] = is_metrics["Flow_Displacement_L1"]
+                    # Vessel segmentation metrics (OCT)
+                    if ves_model is not None:
+                        p_ves = extract_vessels_oct(pred_np_01, ves_model, device=device)
+                        g_ves = extract_vessels_oct(gt_np_01, ves_model, device=device)
+                        v_mets = compute_vessel_metrics(p_ves, g_ves)
+                        all_results[arm][seed_val]["Vessel_Dice"][key] = v_mets["Vessel_Dice"]
 
-                # Store additional lag-k SSIMs
-                for k in (1, 2, 4, 8, 16):
-                    k_name = f"LagSSIM_Gap_k{k}"
-                    if k_name in is_metrics:
-                        if k_name not in all_results[arm][seed_val]:
-                            all_results[arm][seed_val][k_name] = {}
-                        all_results[arm][seed_val][k_name][key] = is_metrics[k_name]
+                    # Inter-slice structural metrics
+                    if x_mmse.min() < 0.0:
+                        mmse_np_01 = np.clip(x_mmse.cpu().numpy()[0, 0] * 0.5 + 0.5, 0.0, 1.0)
+                    else:
+                        mmse_np_01 = np.clip(x_mmse.cpu().numpy()[0, 0], 0.0, 1.0)
+                    is_metrics = evaluate_interslice_structure(
+                        pred=pred_np_01,
+                        gt=gt_np_01,
+                        mmse_pred=mmse_np_01,
+                        lpips_fn=lpips_fn,
+                        device=device
+                    )
+
+                    all_results[arm][seed_val]["Adjacent_SSIM_Gap"][key] = is_metrics["Adjacent_SSIM_Gap"]
+                    all_results[arm][seed_val]["Log_Spectral_Distance"][key] = is_metrics["Log_Spectral_Distance"]
+                    all_results[arm][seed_val]["Orthogonal_SSIM_mean"][key] = is_metrics["Orthogonal_SSIM_mean"]
+                    all_results[arm][seed_val]["Orthogonal_LPIPS_mean"][key] = is_metrics["Orthogonal_LPIPS_mean"]
+                    all_results[arm][seed_val]["Flow_Displacement_L1"][key] = is_metrics["Flow_Displacement_L1"]
+
+                    # Store additional lag-k SSIMs
+                    for k in (1, 2, 4, 8, 16):
+                        k_name = f"LagSSIM_Gap_k{k}"
+                        if k_name in is_metrics:
+                            if k_name not in all_results[arm][seed_val]:
+                                all_results[arm][seed_val][k_name] = {}
+                            all_results[arm][seed_val][k_name][key] = is_metrics[k_name]
 
                 # Collect features for FID
                 if feature_extractor is not None:
@@ -313,7 +369,7 @@ def run_ablation(args):
                         arm_features[arm][seed_val].append(np.concatenate(p_feats, axis=0))
 
                 # Save predicted volume if requested
-                if args.save_volumes:
+                if args.save_volumes and not args.no_save_volumes:
                     arm_save_dir = out_dir / arm / f"seed_{seed_val}"
                     arm_save_dir.mkdir(parents=True, exist_ok=True)
                     np.save(arm_save_dir / f"{key}.npy", pred_np_01)
@@ -326,6 +382,10 @@ def run_ablation(args):
                 for b_i in range(0, g_slices.shape[0], 32):
                     g_feats.append(feature_extractor(g_slices[b_i:b_i + 32]).cpu().numpy())
                 gt_features_list.append(np.concatenate(g_feats, axis=0))
+
+        # Incremental save of raw results after each case
+        with open(results_file, "wb") as f:
+            pickle.dump(all_results, f)
 
     # Compute FID for each arm and seed
     if feature_extractor is not None and gt_features_list:
@@ -415,12 +475,71 @@ def main():
     parser.add_argument("--slice_batch_size", type=int, default=16, help="Mini-batch size of slices.")
     parser.add_argument("--max_cases", type=int, default=None, help="Optional max cases to evaluate (e.g. 2 for smoke test).")
     parser.add_argument("--device", type=str, default="cuda" if torch.cuda.is_available() else "cpu")
+    parser.add_argument(
+        "--modality",
+        type=str,
+        choices=[C.MODALITY_OCT, C.MODALITY_CT],
+        default=C.MODALITY_OCT,
+        help="Modality to evaluate (oct or ct)."
+    )
+    parser.add_argument(
+        "--data_dir",
+        type=str,
+        default=None,
+        help="Base data directory (e.g. HDF5 directory for CT)."
+    )
+    parser.add_argument(
+        "--data_format",
+        type=str,
+        default=C.FORMAT_AUTO,
+        help="Data format (auto, nii, h5, npy)."
+    )
+    parser.add_argument(
+        "--radimagenet_path",
+        type=str,
+        default="/home/thomas-pinetz/tools/RadImageNet/RadImageNet_pytorch/ResNet50.pt",
+        help="Path to RadImageNet checkpoint for CT FID."
+    )
     parser.add_argument("--eval_vessels", action="store_true", default=True)
     parser.add_argument("--no_fid", action="store_true", default=False, help="Disable FID computation.")
     parser.add_argument("--save_volumes", action="store_true", default=True)
+    parser.add_argument("--no_save_volumes", action="store_true", default=False, help="Do not save predicted volumes.")
+    parser.add_argument("--sdif_fid_only", action="store_true", default=False, help="Only compute SDIF and FID for maximum speed.")
     parser.add_argument("--verify_endpoints", action="store_true", default=True)
 
     args = parser.parse_args()
+
+    # Apply CT defaults if modality is CT and paths were not explicitly overridden
+    if args.modality == C.MODALITY_CT:
+        oct_flow_default = "/home/optima/tpinetz/data/results/iscreen/gen/2026-02-20_09-09-18_ms__rflow_cleaned_song_sigma_01/version_0/checkpoints/last.ckpt"
+        if args.flow_ckpt == oct_flow_default:
+            args.flow_ckpt = "/home/optima/tpinetz/data/results/iscreen/gen/2026-06-30_11-24-06_ms_rflow_ct_float32/version_0/checkpoints/last.ckpt"
+        oct_mmse_default = "/home/optima/tpinetz/data/results/iscreen/gen/2026-01-23_11-33-50_ms_mmse_added_augs_transupnet/version_0/checkpoints/last.ckpt"
+        if args.mmse_ckpt == oct_mmse_default:
+            args.mmse_ckpt = "/home/optima/tpinetz/data/results/iscreen/gen/2026-06-26_12-03-29_ms_xray_to_ct/version_0/checkpoints/last.ckpt"
+        oct_cache_default = "/media/thomas-pinetz/data/data/OCT/results/mmse/2026-01-23_11-33-50_ms_mmse_added_augs_transupnet"
+        if args.mmse_cached_dir == oct_cache_default:
+            local_mmse = Path("/media/thomas-pinetz/data/data/CT/results/2026-06-26_12-03-29_ms_xray_to_ct")
+            if local_mmse.exists():
+                args.mmse_cached_dir = str(local_mmse)
+            else:
+                args.mmse_cached_dir = "/home/optima/tpinetz/data/CT/LIDC-IDRI/ours_transupnet"
+        if args.seeds == [42, 1042, 2042]:
+            args.seeds = [42]
+        oct_df_default = "/home/thomas-pinetz/repos/eye-screen/data_splits/fund_mip_251211/test_keys.csv"
+        if args.df == oct_df_default:
+            args.df = "/home/thomas-pinetz/repos/eye-screen/data_splits/LIDC_IDRI/val_keys.csv"
+        oct_vol_default = "/home/optima/tpinetz/data/OCT/retinsight/FundusMIP/flattened_volumes"
+        if args.vol_path == oct_vol_default:
+            args.vol_path = "/home/optima/tpinetz/data/CT/LIDC-IDRI/CT"
+        oct_img_default = "/home/optima/tpinetz/data/OCT/retinsight/FundusMIP/Fundus_cropped_color"
+        if args.img_path == oct_img_default:
+            args.img_path = "/home/optima/tpinetz/data/CT/LIDC-IDRI/synth_xray"
+        args.eval_vessels = False
+        oct_res_default = "/media/thomas-pinetz/data/data/OCT/results/noise_coupling_ablation_2026-02-20_09-09-18"
+        if args.res_path == oct_res_default:
+            args.res_path = "/media/thomas-pinetz/data/data/CT/results/noise_coupling_ablation_full"
+
     run_ablation(args)
 
 

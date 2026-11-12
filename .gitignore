@@ -236,3 +236,6 @@ results/*
 scripts/torchinductor*
 assets/*
 scratch/*
+
+*.png
+*.tex

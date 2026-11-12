@@ -89,11 +89,14 @@ def load_and_aggregate_results(raw_path: Path) -> Tuple[Dict[str, pd.DataFrame],
 
     for arm in arms:
         seeds = list(data[arm].keys())
-        # First gather all metric names
-        metric_names = [m for m in data[arm][seeds[0]].keys() if m != "FID"]
+        # First gather all metric names with data
+        metric_names = [m for m in data[arm][seeds[0]].keys() if m != "FID" and len(data[arm][seeds[0]][m]) > 0]
 
-        # Collect cases
-        case_keys = list(data[arm][seeds[0]][metric_names[0]].keys())
+        # Collect cases across available metrics
+        case_keys = set()
+        for m in metric_names:
+            case_keys.update(data[arm][seeds[0]][m].keys())
+        case_keys = sorted(list(case_keys))
         case_rows = []
 
         for key in case_keys:
@@ -228,7 +231,7 @@ def df_to_markdown_str(df: pd.DataFrame) -> str:
     return "\n".join(lines)
 
 
-def analyze(raw_pkl_path: str, out_dir: Optional[str] = None):
+def analyze(raw_pkl_path: str, out_dir: Optional[str] = None, modality: str = "auto"):
     raw_path = Path(raw_pkl_path).expanduser()
     if not raw_path.exists():
         raise FileNotFoundError(f"Ablation file not found: {raw_path}")
@@ -239,6 +242,18 @@ def analyze(raw_pkl_path: str, out_dir: Optional[str] = None):
     print(f"Loading ablation results from: {raw_path}")
     per_arm_dfs, per_arm_fids = load_and_aggregate_results(raw_path)
 
+    # Detect modality if auto
+    has_vessels = any(
+        "Vessel_Dice" in df.columns and df["Vessel_Dice"].dropna().count() > 0
+        for df in per_arm_dfs.values()
+    )
+    if modality == "auto":
+        is_ct = ("ct" in str(raw_path).lower()) or (not has_vessels)
+        modality_str = "CT" if is_ct else "OCT"
+    else:
+        modality_str = modality.upper()
+        is_ct = (modality_str == "CT")
+
     summary_metrics = [
         "Adjacent_SSIM_Gap",
         "Log_Spectral_Distance",
@@ -248,28 +263,28 @@ def analyze(raw_pkl_path: str, out_dir: Optional[str] = None):
         "PSNR",
         "SSIM",
         "LPIPS",
-        "Vessel_Dice",
         "FID",
         "Flow_Displacement_L1"
     ]
+    if not is_ct and has_vessels:
+        summary_metrics.insert(8, "Vessel_Dice")
+
+    available_cols = set()
+    for df in per_arm_dfs.values():
+        for col in df.columns:
+            if col != "Case" and df[col].dropna().count() > 0:
+                available_cols.add(col)
+
+    summary_metrics = [m for m in summary_metrics if (m in available_cols or m == "FID")]
+    hypothesis_metrics = [m for m in hypothesis_metrics if m in available_cols]
 
     summary_df = generate_summary_table(per_arm_dfs, per_arm_fids, summary_metrics)
     summary_csv = save_dir / "ablation_summary_table.csv"
     summary_df.to_csv(summary_csv, index=False)
     print("\n" + "=" * 90)
-    print("NOISE COUPLING ABLATION SUMMARY (OCT: 2D Flow + MMSE)")
+    print(f"NOISE COUPLING ABLATION SUMMARY ({modality_str}: 2D Flow + MMSE)")
     print("=" * 90)
     print(df_to_markdown_str(summary_df))
-
-    hypothesis_metrics = [
-        "Adjacent_SSIM_Gap",
-        "Log_Spectral_Distance",
-        "Orthogonal_SSIM_mean",
-        "Orthogonal_LPIPS_mean",
-        "SDIF",
-        "SSIM",
-        "Vessel_Dice"
-    ]
 
     tests_df = run_paired_hypothesis_tests(per_arm_dfs, hypothesis_metrics)
     tests_csv = save_dir / "paired_statistical_tests.csv"
@@ -282,11 +297,15 @@ def analyze(raw_pkl_path: str, out_dir: Optional[str] = None):
     # Export clean markdown report
     report_md = save_dir / "noise_coupling_report.md"
     with open(report_md, "w") as f:
-        f.write("# Noise Coupling Ablation: Through-Plane Structural Comparison\n\n")
+        f.write(f"# Noise Coupling Ablation: Through-Plane Structural Comparison ({modality_str})\n\n")
         f.write("### Model Configuration\n")
-        f.write("- **Modality**: OCT\n")
-        f.write("- **Initial MMSE Estimator**: `2026-01-23_11-33-50_ms_mmse_added_augs_transupnet`\n")
-        f.write("- **2D Rectified Flow**: `2026-02-20_09-09-18_ms__rflow_cleaned_song_sigma_01` (SongUNet, $\\sigma_{start} = 0.1$, $T = 20$)\n")
+        f.write(f"- **Modality**: {modality_str}\n")
+        if is_ct:
+            f.write("- **Initial MMSE Estimator**: `2026-06-26_12-03-29_ms_xray_to_ct`\n")
+            f.write("- **2D Rectified Flow**: `2026-06-30_11-24-06_ms_rflow_ct_float32` (SongUNet, $\\sigma_{start} = 0.01$, $T = 20$)\n")
+        else:
+            f.write("- **Initial MMSE Estimator**: `2026-01-23_11-33-50_ms_mmse_added_augs_transupnet`\n")
+            f.write("- **2D Rectified Flow**: `2026-02-20_09-09-18_ms__rflow_cleaned_song_sigma_01` (SongUNet, $\\sigma_{start} = 0.1$, $T = 20$)\n")
         f.write("- **Randomness**: Paired Randomness / Common Random Numbers (matched endpoints $z_0, z_1$ across arms)\n\n")
         f.write("### Summary Table\n\n")
         f.write(df_to_markdown_str(summary_df))
@@ -308,8 +327,9 @@ def main():
         help="Path to ablation_results_raw.pkl."
     )
     parser.add_argument("--out_dir", type=str, default=None, help="Directory to save output tables and reports.")
+    parser.add_argument("--modality", type=str, choices=["oct", "ct", "auto"], default="auto", help="Modality (oct, ct, or auto).")
     args = parser.parse_args()
-    analyze(args.raw_pkl, args.out_dir)
+    analyze(args.raw_pkl, args.out_dir, args.modality)
 
 
 if __name__ == "__main__":

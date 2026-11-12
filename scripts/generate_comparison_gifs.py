@@ -1,12 +1,14 @@
 import argparse
 import io
+import pickle
 from pathlib import Path
-from typing import Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from PIL import Image
 import matplotlib.pyplot as plt
 import numpy as np
 
 from pmrf3dsynthesis.eval_model import load_sample
+
 
 
 def generate_synthesis_gif(
@@ -35,7 +37,7 @@ def generate_synthesis_gif(
         panels = ["input", "gt", "mmse", "noslerp", "slerp"]
 
     if target_size is None:
-        target_size = (272 * len(panels), 320)
+        target_size = (352 * len(panels), 416)
 
     gt_vol = np.clip(gt_vol, 0.0, 1.0)
     mmse_vol = np.clip(mmse_vol, 0.0, 1.0)
@@ -158,18 +160,87 @@ def generate_synthesis_gif(
     print(f"Successfully saved animation to: {out_file} ({len(all_frames)} frames at duration={frame_duration}ms, size={target_size})")
 
 
-def generate_best_oct_gif(
-    output_path: str = "assets/test_case_oct.gif",
+def get_oct_metrics(case_key: str, slerp_dir: Optional[Path] = None) -> str:
+    """Retrieves evaluation metrics for an OCT test case from eval_results.pkl."""
+    if slerp_dir is None:
+        oct_base = Path("/media/thomas-pinetz/data/data/OCT/results")
+        slerp_dir = oct_base / "2026-02-16_12-07-23_ms_cleaned_song_sigma_01_rflow_with_20_steps_slerp_noise"
+    
+    pkl_file = slerp_dir / "eval_results.pkl"
+    if not pkl_file.exists():
+        return ""
+
+    try:
+        with open(pkl_file, "rb") as f:
+            data = pickle.load(f)
+        psnr = data.get("PSNR", {}).get(case_key)
+        ssim = data.get("SSIM", {}).get(case_key)
+        vessel = data.get("Vessel_Dice", {}).get(case_key)
+
+        parts = []
+        if psnr is not None and np.isfinite(psnr):
+            parts.append(f"PSNR {psnr:.2f} dB")
+        if ssim is not None and np.isfinite(ssim):
+            parts.append(f"SSIM {ssim:.4f}")
+        if vessel is not None and np.isfinite(vessel):
+            parts.append(f"Vessel Dice {vessel:.4f}")
+
+        if parts:
+            return f"Slerp (20 steps): " + ", ".join(parts)
+    except Exception as e:
+        print(f"Warning: Could not read metrics for {case_key}: {e}")
+
+    return ""
+
+
+def get_top_oct_cases(n: int = 5, rank_by: str = "vessel") -> List[str]:
+    """Returns top N OCT case keys ranked by Vessel_Dice or PSNR."""
+    oct_base = Path("/media/thomas-pinetz/data/data/OCT/results")
+    slerp_dir = oct_base / "2026-02-16_12-07-23_ms_cleaned_song_sigma_01_rflow_with_20_steps_slerp_noise"
+    pkl_file = slerp_dir / "eval_results.pkl"
+    if not pkl_file.exists():
+        raise FileNotFoundError(f"Evaluation file not found: {pkl_file}")
+
+    with open(pkl_file, "rb") as f:
+        data = pickle.load(f)
+
+    metric_name = "Vessel_Dice" if rank_by.lower() == "vessel" else "PSNR"
+    metric_dict = data.get(metric_name, {})
+    sorted_cases = sorted(
+        metric_dict.keys(),
+        key=lambda k: metric_dict[k] if np.isfinite(metric_dict[k]) else -1e9,
+        reverse=True
+    )
+    return sorted_cases[:n]
+
+
+def generate_oct_case_gif(
+    case_key: str,
+    output_path: str,
     panels: Optional[list] = None,
-    target_size: Optional[Tuple[int, int]] = None
+    target_size: Optional[Tuple[int, int]] = (1760, 416),
+    fps: float = 8.0,
+    duration: int = 120,
+    show_slice_line: bool = True
 ):
-    case_key = "58049930-25-GIAPKAIDVOKAXAGZMAFILIRCK+BSIMVTVVRKFLXIBHVBLXGTPUICTMNDWJCZYZT+INUBYN"
+    """Generates an animated comparison GIF for an OCT test case."""
     in_oct, gt_oct = load_sample(case_key, "oct")
 
     oct_base = Path("/media/thomas-pinetz/data/data/OCT/results")
-    slerp_file = oct_base / "2026-02-16_12-07-23_ms_cleaned_song_sigma_01_rflow_with_20_steps_slerp_noise" / f"{case_key}.npy"
-    noslerp_file = oct_base / "2026-02-16_12-07-23_ms_cleaned_song_sigma_01_rflow_with_20_steps" / f"{case_key}.npy"
-    mmse_file = oct_base / "mmse/2026-01-23_11-33-50_ms_mmse_added_augs_transupnet" / f"{case_key}.npy"
+    slerp_dir = oct_base / "2026-02-16_12-07-23_ms_cleaned_song_sigma_01_rflow_with_20_steps_slerp_noise"
+    noslerp_dir = oct_base / "2026-02-16_12-07-23_ms_cleaned_song_sigma_01_rflow_with_20_steps"
+    mmse_dir = oct_base / "mmse/2026-01-23_11-33-50_ms_mmse_added_augs_transupnet"
+
+    slerp_file = slerp_dir / f"{case_key}.npy"
+    noslerp_file = noslerp_dir / f"{case_key}.npy"
+    mmse_file = mmse_dir / f"{case_key}.npy"
+
+    if not slerp_file.exists():
+        raise FileNotFoundError(f"Slerp prediction file not found: {slerp_file}")
+    if not noslerp_file.exists():
+        raise FileNotFoundError(f"No-slerp prediction file not found: {noslerp_file}")
+    if not mmse_file.exists():
+        raise FileNotFoundError(f"MMSE prediction file not found: {mmse_file}")
 
     slerp_vol = np.load(slerp_file)
     noslerp_vol = np.load(noslerp_file)
@@ -182,7 +253,7 @@ def generate_best_oct_gif(
     if mmse_vol.min() < 0:
         mmse_vol = mmse_vol * 0.5 + 0.5
 
-    metrics_str = "Slerp (20 steps): PSNR 20.74 dB, SSIM 0.2844, Vessel Dice 0.8207"
+    metrics_str = get_oct_metrics(case_key, slerp_dir)
     generate_synthesis_gif(
         case_key=case_key,
         modality="oct",
@@ -194,11 +265,25 @@ def generate_best_oct_gif(
         output_path=output_path,
         steps=20,
         metrics_str=metrics_str,
-        fps=8,
-        duration=120,
-        show_slice_line=True,
+        fps=fps,
+        duration=duration,
+        show_slice_line=show_slice_line,
         target_size=target_size,
         panels=panels
+    )
+
+
+def generate_best_oct_gif(
+    output_path: str = "assets/test_case_oct.gif",
+    panels: Optional[list] = None,
+    target_size: Optional[Tuple[int, int]] = (1760, 416)
+):
+    case_key = "58049930-25-GIAPKAIDVOKAXAGZMAFILIRCK+BSIMVTVVRKFLXIBHVBLXGTPUICTMNDWJCZYZT+INUBYN"
+    return generate_oct_case_gif(
+        case_key=case_key,
+        output_path=output_path,
+        panels=panels,
+        target_size=target_size
     )
 
 
@@ -262,10 +347,50 @@ def main():
     parser.add_argument("--modality", choices=["oct", "ct", "both"], default="both", help="Which modality GIF to generate.")
     parser.add_argument("--oct_out", type=str, default="assets/test_case_oct.gif")
     parser.add_argument("--ct_out", type=str, default="assets/test_case_ct.gif")
+    parser.add_argument("--case_key", type=str, default=None, help="Specific case key to render.")
+    parser.add_argument("--cases", nargs="+", default=None, help="List of specific case keys to render.")
+    parser.add_argument("--top_n", type=int, default=None, help="Generate GIFs for top N cases ranked by metrics.")
+    parser.add_argument("--rank_by", choices=["vessel", "psnr"], default="vessel", help="Metric to rank cases when using --top_n.")
+    parser.add_argument("--output_dir", type=str, default="assets", help="Directory where case GIFs are stored when using --cases or --top_n.")
     parser.add_argument("--preset", choices=["full", "3panel", "both"], default="full", help="Panel preset.")
     parser.add_argument("--panels", nargs="+", choices=["input", "gt", "mmse", "noslerp", "slerp"], default=None, help="Custom panels list.")
     args = parser.parse_args()
 
+    out_dir = Path(args.output_dir)
+    panels = ["gt", "mmse", "slerp"] if args.preset == "3panel" else args.panels
+
+    # Handle batch or specific case generation for OCT
+    if args.case_key:
+        generate_oct_case_gif(
+            case_key=args.case_key,
+            output_path=args.oct_out if args.oct_out != "assets/test_case_oct.gif" else str(out_dir / f"test_case_oct_{args.case_key[:8]}.gif"),
+            panels=panels
+        )
+        return
+
+    if args.cases:
+        for idx, c_key in enumerate(args.cases, start=1):
+            out_name = out_dir / f"test_case_oct_case{idx}.gif"
+            generate_oct_case_gif(
+                case_key=c_key,
+                output_path=str(out_name),
+                panels=panels
+            )
+        return
+
+    if args.top_n:
+        top_cases = get_top_oct_cases(args.top_n, rank_by=args.rank_by)
+        print(f"Generating GIFs for top {len(top_cases)} OCT cases ranked by {args.rank_by}...")
+        for idx, c_key in enumerate(top_cases, start=1):
+            out_name = out_dir / f"test_case_oct_case{idx}.gif"
+            generate_oct_case_gif(
+                case_key=c_key,
+                output_path=str(out_name),
+                panels=panels
+            )
+        return
+
+    # Standard presets
     if args.preset == "3panel":
         if args.modality in ["oct", "both"]:
             generate_best_oct_3panel_gif(args.oct_out if args.oct_out != "assets/test_case_oct.gif" else "assets/test_case_oct_gt_mmse_ours.gif")
@@ -284,3 +409,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+

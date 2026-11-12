@@ -267,6 +267,11 @@ def load_sample(
                 elif cand2.exists():
                     h5_file = cand2
                     is_h5 = True
+                else:
+                    matches = list(data_dir.glob(f"{key}*/{h5_name}"))
+                    if matches:
+                        h5_file = matches[0]
+                        is_h5 = True
             if not is_h5 and vol_path is not None:
                 cand3 = vol_path / f"{key}.h5"
                 if cand3.exists():
@@ -277,7 +282,15 @@ def load_sample(
             import h5py
             if h5_file is None:
                 if data_dir is not None:
-                    h5_file = data_dir / key / h5_name
+                    cand1 = data_dir / key / h5_name
+                    if cand1.exists():
+                        h5_file = cand1
+                    else:
+                        matches = list(data_dir.glob(f"{key}*/{h5_name}"))
+                        if matches:
+                            h5_file = matches[0]
+                        else:
+                            h5_file = cand1
                 elif vol_path is not None:
                     h5_file = vol_path / f"{key}.h5"
                 else:

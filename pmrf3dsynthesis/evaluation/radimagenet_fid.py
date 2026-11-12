@@ -67,6 +67,7 @@ class RadImageNetFeatureExtractor(nn.Module):
 
         if checkpoint_path is None:
             default_candidates = [
+                os.path.expandvars("$HOME/tools/RadImageNet/RadImageNet_pytorch/ResNet50.pt"),
                 os.path.expandvars("$HOME/Downloads/RadImageNet/RadImageNet_pytorch/ResNet50.pt"),
                 os.path.expandvars("$HOME/data/models/RadImageNet/ResNet50.pt"),
                 os.path.expandvars("$HOME/models/RadImageNet/ResNet50.pt"),

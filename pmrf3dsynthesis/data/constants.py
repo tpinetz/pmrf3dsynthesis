@@ -22,6 +22,7 @@ MODEL_TRANSUPNET = "transupnet"
 SONG_UNET = "song"
 JIT = "jit"
 SONG_3DUNET = "song3d"
+SONG_3DCONDUNET = "song3dcond"
 TRANS_UNET = "transunet"
 
 

@@ -51,13 +51,13 @@ eval-model --model_name mmse_model --ckpt_path mmse.ckpt \
 
 # Full PRFM (MMSE + rectified flow, 20 steps)
 eval-model --model_name flow_model --ckpt_path flow.ckpt --mmse_path mmse.ckpt \
-    --df test_keys.csv --res_path results/prfm --modality oct --T 20 --noise_type slerp --device cuda
+    --df test_keys.csv --res_path results/prfm --modality oct --T 20 --device cuda
 ```
 
 - Metrics: PSNR, 3D-SSIM, LPIPS, SDIF (slice difference), FID, plus vessel Dice/IoU for OCT.
 - FID features: RETFound for OCT, RadImageNet for CT, or Inception (`--fid_feature`).
 - CT volumes are clipped to [−1350, 150] HU and scaled to [0, 1] (`--hu_min`, `--hu_max`).
-- Noise couplings (the paper uses `slerp`; the CLI default is `normal`): `normal` (independent), `constant` (shared), `linear`, `linear_vm` (variance-matched linear), `slerp`.
+- Noise couplings (`--noise_type`, default `slerp` as in the paper): `normal` (independent), `constant` (shared), `linear`, `linear_vm` (variance-matched linear), `slerp`.
 - Results are written to `--res_path` as `eval_results.pkl` / `eval_results.csv` and per-case volumes.
 
 ### `eval-model-only-fundus`: synthesise OCT from fundus images alone

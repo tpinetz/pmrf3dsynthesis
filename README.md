@@ -2,16 +2,10 @@
 
 pmrf3dsynthesis provides tools to perform Fundus-to-MIP registration and prepare inputs for a 3D synthesis pipeline.
 
-## Example GIFS
+## Example GIFs
 
-### OCT
-
-![hippo](./assets/test_case_oct.gif)
-
-### CT
-
-![hippo](./assets/test_case_ct.gif)
-
+The OCT and CT comparison GIFs are not tracked in git (they were ~105 MB). Regenerate them locally with
+`python scripts/generate_comparison_gifs.py`, which writes to `assets/`.
 
 ## Features
 - Fundus to MIP registration (CLI) via [`pmrf3dsynthesis.cli_fundus_oct`](pmrf3dsynthesis/cli_fundus_oct.py)

@@ -1,3 +1,4 @@
+import argparse
 import os
 import sys
 import time
@@ -14,7 +15,8 @@ from tqdm import tqdm
 # Add repo roots to path
 repo_root = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(repo_root))
-sys.path.insert(0, "/home/thomas-pinetz/repos/eye-screen")
+EYE_SCREEN_ROOT = os.environ.get("EYE_SCREEN_ROOT", "/home/thomas-pinetz/repos/eye-screen")
+sys.path.insert(0, EYE_SCREEN_ROOT)
 
 from eyescreen.models.stable_edm_model import Stable_EDM_model
 from causalvideovae.model import ModelRegistry
@@ -62,31 +64,53 @@ def edm_sampler_fn(net, latents, adjacent, num_steps=20, sigma_min=0.002, sigma_
 
     return x_next
 
+RUN_NAME = "2026-09-04_11-48-25_ms__stable_edm_fundus_oct_pretrained_vae"
+
+
+def parse_args():
+    p = argparse.ArgumentParser(description="Evaluate the Stable EDM (WF-VAE latent) baseline on the OCT test set.")
+    p.add_argument("--num-steps", type=int, default=20, help="Heun sampler steps (paper: 20 and 100).")
+    p.add_argument("--ckpt", default=f"/home/thomas-pinetz/data/results/iscreen/gen/{RUN_NAME}/version_0/checkpoints/last.ckpt")
+    p.add_argument("--stats", default="/home/thomas-pinetz/data/OCT/retinsight/FundusMIP/volumes_wf_vae/dataset_mean_std.pkl")
+    p.add_argument("--fundus-dir", default="/home/thomas-pinetz/data/OCT/retinsight/FundusMIP/Fundus_cropped_color")
+    p.add_argument("--test-csv", default=os.path.join(EYE_SCREEN_ROOT, "data_splits/fund_mip_251211/test_keys.csv"))
+    p.add_argument("--seed", type=int, default=None,
+                   help="Seed case i with seed + i. The 100-step paper run used --seed 42; the 20-step run was unseeded.")
+    p.add_argument("--out-dir", default=None,
+                   help="Defaults to .../OCT/results/<run>, with _with_<N>_steps appended when --num-steps != 20.")
+    return p.parse_args()
+
+
 def main():
+    args = parse_args()
     device = "cuda" if torch.cuda.is_available() else "cpu"
-    print(f"Using device: {device}")
+    print(f"Using device: {device}", flush=True)
 
     # Paths
-    ckpt_path = "/home/thomas-pinetz/data/results/iscreen/gen/2026-09-04_11-48-25_ms__stable_edm_fundus_oct_pretrained_vae/version_0/checkpoints/last.ckpt"
-    stats_path = "/home/thomas-pinetz/data/OCT/retinsight/FundusMIP/volumes_wf_vae/dataset_mean_std.pkl"
-    fundus_dir = Path("/home/thomas-pinetz/data/OCT/retinsight/FundusMIP/Fundus_cropped_color")
-    out_dir = Path("/media/thomas-pinetz/data/data/OCT/results/2026-09-04_11-48-25_ms__stable_edm_fundus_oct_pretrained_vae")
+    ckpt_path = args.ckpt
+    stats_path = args.stats
+    fundus_dir = Path(args.fundus_dir)
+    if args.out_dir is None:
+        suffix = "" if args.num_steps == 20 else f"_with_{args.num_steps}_steps"
+        out_dir = Path(f"/media/thomas-pinetz/data/data/OCT/results/{RUN_NAME}{suffix}")
+    else:
+        out_dir = Path(args.out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
 
     # 1. Load Stable EDM model
-    print(f"Loading checkpoint from: {ckpt_path}")
+    print(f"Loading checkpoint from: {ckpt_path}", flush=True)
     ckpt = torch.load(ckpt_path, map_location="cpu")
     model = Stable_EDM_model(**ckpt["hyper_parameters"])
     model.load_state_dict(ckpt["state_dict"], strict=True)
     model = model.to(device).eval()
-    print("Stable_EDM_model loaded successfully.")
+    print("Stable_EDM_model loaded successfully.", flush=True)
 
     # 2. Load WF-VAE
-    print("Loading WF-VAE ('chestnutlzj/WF-VAE-L-16Chn')...")
+    print("Loading WF-VAE ('chestnutlzj/WF-VAE-L-16Chn')...", flush=True)
     vae = ModelRegistry.get_model("WFVAE").from_pretrained("chestnutlzj/WF-VAE-L-16Chn")
     vae = vae.to(device, dtype=torch.bfloat16).eval()
     vae.enable_tiling()
-    print("WF-VAE loaded successfully.")
+    print("WF-VAE loaded successfully.", flush=True)
 
     # 3. Load stats
     with open(stats_path, "rb") as f:
@@ -95,9 +119,9 @@ def main():
     std_th = torch.from_numpy(stats["std"]).to(device=device, dtype=torch.float32)[None, :, None, None, None]
 
     # 4. Get 81 test keys
-    test_csv = "/home/thomas-pinetz/repos/eye-screen/data_splits/fund_mip_251211/test_keys.csv"
+    test_csv = args.test_csv
     keys = pd.read_csv(test_csv)["Keys"].tolist()
-    print(f"Total test cases: {len(keys)}")
+    print(f"Total test cases: {len(keys)}", flush=True)
 
     # 5. Initialize metric calculators
     psnr_fn = PeakSignalNoiseRatio(data_range=1.0).to(device)
@@ -120,7 +144,7 @@ def main():
 
     # 6. Evaluation loop
     pbar = tqdm(keys, desc="Evaluating Stable EDM OCT")
-    for key in pbar:
+    for idx, key in enumerate(pbar):
         # Load Ground Truth (shape (128, 256, 256) in [0, 1])
         in_img, gt_vol = load_sample(key, "oct")
         gt_01 = np.clip(gt_vol.astype(np.float32), 0.0, 1.0)
@@ -145,8 +169,10 @@ def main():
                 np.save(pred_file, pred_01)
         else:
             with torch.no_grad():
+                if args.seed is not None:
+                    torch.manual_seed(args.seed + idx)
                 init_latents = torch.randn((1, 16, 33, 64, 64), device=device)
-                sample = edm_sampler_fn(model, init_latents, fundus_t, num_steps=20)
+                sample = edm_sampler_fn(model, init_latents, fundus_t, num_steps=args.num_steps)
                 unnorm = sample.float() * (2.0 * std_th) + mean_th
                 dec = vae.decode(unnorm.to(dtype=torch.bfloat16)).sample
                 pred_vol = dec[0, 0, :128].float().cpu().numpy()
@@ -210,7 +236,7 @@ def main():
     vdice_vals = list(eval_results["Vessel_Dice"].values())
 
     print("\n" + "=" * 70)
-    print("FINAL RESULTS: 2026-09-04_11-48-25_ms__stable_edm_fundus_oct_pretrained_vae")
+    print(f"FINAL RESULTS: {RUN_NAME}, {args.num_steps} steps")
     print("=" * 70)
     print(f"  PSNR:        {np.mean(psnrs):.2f} ± {np.std(psnrs, ddof=1):.2f} dB")
     print(f"  SSIM:        {np.mean(ssims):.4f} ± {np.std(ssims, ddof=1):.4f}")

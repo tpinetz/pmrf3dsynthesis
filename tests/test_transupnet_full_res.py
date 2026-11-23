@@ -4,7 +4,7 @@ import torch
 import torchvision
 
 from pmrf3dsynthesis.models import transunet
-from pmrf3dsynthesis.models.transupnet import TransUpNet, fundus_input_size
+from pmrf3dsynthesis.models.transupnet import FundusStem, TransUpNet, fundus_input_size
 
 
 @pytest.fixture(autouse=True)
@@ -44,11 +44,29 @@ def test_wrong_input_size_raises():
         model(torch.randn(1, 3, *ENFACE))
 
 
-@pytest.mark.parametrize("fundus_size", [(48, 64), (40, 64)])
-def test_invalid_fundus_size_raises(fundus_size):
-    # 48/16 = 3 is not a power of two; 40 is not a multiple of 16.
+@pytest.mark.parametrize("fundus_size", [(53, 53), (48, 64)])
+def test_non_power_of_two_sizes_map_to_enface_grid(fundus_size):
+    model = TransUpNet(in_channels=3, slides=SLICES, fundus_size=fundus_size, enface_size=ENFACE, stem_channels=16)
+    out = model(torch.randn(1, 3, *fundus_size))[-1]
+    assert out.shape == (1, 1, ENFACE[0], SLICES, ENFACE[1])
+
+
+def test_stem_on_850_crop():
+    # The saved registered crops are 850x850: strided stages to 213x425, then pooled to 128x256.
+    stem = FundusStem(3, 8, (850, 850), (128, 256))
+    assert isinstance(stem.net[-1], torch.nn.AdaptiveAvgPool2d)
+    assert stem(torch.randn(1, 3, 850, 850)).shape == (1, 8, 128, 256)
+
+
+def test_power_of_two_crop_needs_no_pooling():
+    stem = FundusStem(3, 8, (512, 512), (128, 256))
+    assert not any(isinstance(m, torch.nn.AdaptiveAvgPool2d) for m in stem.net)
+    assert stem(torch.randn(1, 3, 512, 512)).shape == (1, 8, 128, 256)
+
+
+def test_fundus_smaller_than_grid_raises():
     with pytest.raises(ValueError):
-        TransUpNet(in_channels=3, slides=SLICES, fundus_size=fundus_size, enface_size=ENFACE)
+        TransUpNet(in_channels=3, slides=SLICES, fundus_size=(8, 64), enface_size=ENFACE)
 
 
 def test_fundus_input_size_helper():

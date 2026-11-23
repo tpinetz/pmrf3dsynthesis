@@ -13,6 +13,7 @@ from pmrf3dsynthesis.evaluation.retfound_fid import RETFoundFeatureExtractor
 from pmrf3dsynthesis.evaluation.radimagenet_fid import RadImageNetFeatureExtractor
 from pmrf3dsynthesis.models.flow_model import FlowModel
 from pmrf3dsynthesis.models.mmse_model import MMSEModel
+from pmrf3dsynthesis.models.transupnet import fundus_input_size
 from torchmetrics.image import PeakSignalNoiseRatio
 from torchmetrics.image import StructuralSimilarityIndexMeasure
 from torchmetrics.image.fid import FrechetInceptionDistance
@@ -207,7 +208,8 @@ def load_sample(
     hu_max: float = 150.0,
     ct_scale: float = 5800.0,
     xray_scale: float = 1200.0,
-    target_vol_shape: Optional[Tuple[int, int, int]] = None
+    target_vol_shape: Optional[Tuple[int, int, int]] = None,
+    fundus_size: Tuple[int, int] = (128, 256)
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Loads 2D input image and 3D ground truth volume for a given case key.
@@ -241,7 +243,7 @@ def load_sample(
         input_img = iio.imread(img_file)
         if input_img.dtype == np.uint8:
             input_img = input_img / 255.0
-        input_img = resize(input_img, (128, 256))
+        input_img = resize(input_img, tuple(fundus_size))
 
         return input_img, volume
 
@@ -445,7 +447,8 @@ def evaluate_model(
     eval_lpips: bool = True,
     eval_sdif: bool = True,
     save_nii: bool = False,
-    device: str = 'cpu'
+    device: str = 'cpu',
+    fundus_size: Tuple[int, int] = (128, 256)
 ) -> Dict:
     """Evaluates model over dataset cases and computes PSNR, SSIM, LPIPS, SDIF, FID, and optional vessel metrics."""
     res_path.mkdir(parents=True, exist_ok=True)
@@ -498,7 +501,8 @@ def evaluate_model(
                 hu_min=hu_min,
                 hu_max=hu_max,
                 ct_scale=ct_scale,
-                xray_scale=xray_scale
+                xray_scale=xray_scale,
+                fundus_size=fundus_size
             )
         except Exception as e:
             logging.error(f"Error loading sample {key}: {e}. Skipping.")
@@ -822,7 +826,8 @@ def run_cli():
         eval_lpips=not args.no_lpips,
         eval_sdif=not args.no_sdif,
         save_nii=args.save_nii,
-        device=args.device
+        device=args.device,
+        fundus_size=fundus_input_size(model)
     )
 
     with open(res_path / "eval_results.pkl", "wb") as f:

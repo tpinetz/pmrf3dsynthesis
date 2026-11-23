@@ -36,6 +36,7 @@ sys.path.insert(0, str(repo_root))
 from pmrf3dsynthesis.data import constants as C
 from pmrf3dsynthesis.models.flow_model import FlowModel
 from pmrf3dsynthesis.models.mmse_model import MMSEModel
+from pmrf3dsynthesis.models.transupnet import fundus_input_size
 from pmrf3dsynthesis.models.slice_noise import draw_slice_endpoints, make_slice_noise
 from pmrf3dsynthesis.evaluation.ssim import SSIM3D
 from pmrf3dsynthesis.evaluation.retfound_fid import RETFoundFeatureExtractor
@@ -223,7 +224,8 @@ def run_ablation(args):
             img_path=img_path,
             data_dir=data_dir,
             data_format=args.data_format,
-            target_vol_shape=(128, 256, 256) if args.modality == C.MODALITY_CT else None
+            target_vol_shape=(128, 256, 256) if args.modality == C.MODALITY_CT else None,
+            fundus_size=fundus_input_size(mmse_model)
         )
         gt_t = torch.from_numpy(gt_vol[None, None]).float().to(device)
         gt_01 = torch.clamp(gt_t, 0.0, 1.0)

@@ -1,3 +1,5 @@
+import argparse
+import re
 from typing import Optional, Tuple, Union
 import torch
 from pmrf3dsynthesis.data import constants as C
@@ -26,6 +28,88 @@ def draw_slice_endpoints(
     z0 = torch.randn(end_shape, generator=generator, device=device, dtype=dtype)
     z1 = torch.randn(end_shape, generator=generator, device=device, dtype=dtype)
     return z0, z1
+
+
+_FREQSPLIT_RE = re.compile(r"^(freqsplit(?:_slerp)?)(?:_fc([0-9]*\.?[0-9]+))?$")
+
+
+def parse_freqsplit(noise_type: str) -> Optional[Tuple[str, float]]:
+    """Returns (low-band source, cutoff) for a frequency-split noise name, else None.
+
+    'freqsplit' -> ('constant', 0.1); 'freqsplit_slerp_fc0.2' -> ('slerp', 0.2).
+    """
+    m = _FREQSPLIT_RE.match(noise_type)
+    if m is None:
+        return None
+    cutoff = float(m.group(2)) if m.group(2) else C.FREQSPLIT_DEFAULT_CUTOFF
+    if not 0.0 < cutoff:
+        raise ValueError(f"freqsplit cutoff must be positive, got {cutoff}")
+    source = C.NOISE_TYPE_SLERP if m.group(1) == C.NOISE_TYPE_FREQSPLIT_SLERP else C.NOISE_TYPE_CONSTANT
+    return source, cutoff
+
+
+def is_valid_noise_type(noise_type: str) -> bool:
+    return noise_type in (
+        C.NOISE_TYPE_NORMAL, C.NOISE_TYPE_CONSTANT, C.NOISE_TYPE_LINEAR,
+        C.NOISE_TYPE_LINEAR_VM, C.NOISE_TYPE_SLERP,
+    ) or parse_freqsplit(noise_type) is not None
+
+
+def noise_type_arg(value: str) -> str:
+    """argparse type for --noise_type: the fixed names plus freqsplit[_slerp][_fc<cutoff>]."""
+    if not is_valid_noise_type(value):
+        raise argparse.ArgumentTypeError(
+            f"unknown noise type '{value}' (normal, constant, linear, linear_vm, slerp, "
+            "freqsplit[_fc<cutoff>], freqsplit_slerp[_fc<cutoff>])"
+        )
+    return value
+
+
+def freqsplit_gains(H: int, W: int, cutoff: float, device=None) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Power-complementary low/high gains on the rfft2 grid (H, W // 2 + 1), float32."""
+    fy = torch.fft.fftfreq(H, device=device)
+    fx = torch.fft.rfftfreq(W, device=device)
+    r2 = fy[:, None] ** 2 + fx[None, :] ** 2
+    low = torch.exp(-r2 / (2.0 * cutoff ** 2))
+    high = torch.sqrt(torch.clamp(1.0 - low ** 2, min=0.0))
+    return low, high
+
+
+def _apply_gain(z: torch.Tensor, gain: torch.Tensor) -> torch.Tensor:
+    """Filters the last two axes of a real tensor with a real, radially symmetric gain."""
+    H, W = z.shape[-2:]
+    spec = torch.fft.rfft2(z.float(), dim=(-2, -1)) * gain
+    return torch.fft.irfft2(spec, s=(H, W), dim=(-2, -1)).to(z.dtype)
+
+
+def _slerp_volume(z0: torch.Tensor, z1: torch.Tensor, D: int, eps: float) -> torch.Tensor:
+    """Slerp between per-batch endpoints z0, z1 (B, C, H, W) over D slices -> (B, C, D, H, W)."""
+    alphas = torch.linspace(0.0, 1.0, D, device=z0.device, dtype=z0.dtype).view(1, 1, D, 1, 1)
+    noise_batches = []
+    for b in range(z0.shape[0]):
+        z0_b = z0[b]  # (C, H, W)
+        z1_b = z1[b]  # (C, H, W)
+        z0_flat = z0_b.reshape(-1)
+        z1_flat = z1_b.reshape(-1)
+        norm_0 = z0_flat.norm()
+        norm_1 = z1_flat.norm()
+
+        cos_omega = torch.dot(z0_flat, z1_flat) / (norm_0 * norm_1 + eps)
+        cos_omega = torch.clamp(cos_omega, -1.0 + 1e-7, 1.0 - 1e-7)
+        omega = torch.acos(cos_omega)
+        sin_omega = torch.sin(omega)
+
+        # Slerp weights across depth: shape (1, D, 1, 1)
+        alpha_d = alphas[0]  # (1, D, 1, 1)
+        w1 = torch.sin((1.0 - alpha_d) * omega) / (sin_omega + eps)
+        w2 = torch.sin(alpha_d * omega) / (sin_omega + eps)
+
+        # (1, D, 1, 1) * (C, 1, H, W) -> (C, D, H, W)
+        noise_b = w1 * z0_b.unsqueeze(1) + w2 * z1_b.unsqueeze(1)
+        noise_batches.append(noise_b)
+
+    noise = torch.stack(noise_batches, dim=0)  # (B, C, D, H, W)
+    return noise
 
 
 def make_slice_noise(
@@ -59,7 +143,19 @@ def make_slice_noise(
     5. 'slerp' (Spherical Linear Interpolation):
        Interpolates along the great-circle arc between z0 and z1 on the high-dimensional sphere.
        Preserves unit norm/variance across slices.
+
+    6. 'freqsplit' / 'freqsplit_slerp' (frequency-split coupling):
+       Splits every slice into a low and a high in-plane (B-scan) frequency band with
+       power-complementary Gaussian gains, L(f) = exp(-|f|^2 / (2 fc^2)) and
+       Hi(f) = sqrt(1 - L(f)^2). The low band is shared by all slices (L * z0 for
+       'freqsplit') or follows the slerp path (L * slerp(z0, z1) for 'freqsplit_slerp');
+       the high band is fresh N(0, I) noise per slice. Because L^2 + Hi^2 = 1 the
+       independent-band sum is again white, so each 'freqsplit' slice is exactly N(0, I)
+       (and 'freqsplit_slerp' matches slerp's marginal variance). Append '_fc<cutoff>'
+       (cycles/pixel, default C.FREQSPLIT_DEFAULT_CUTOFF) to pick the cutoff. The low band
+       holds about pi * fc^2 of the power (fc=0.1: 3%, fc=0.2: 13%, fc=0.3: 28%).
     """
+    freqsplit = parse_freqsplit(noise_type)
     if len(shape) != 5:
         raise ValueError(f"make_slice_noise expects shape (B, C, D, H, W), got {shape}")
 
@@ -111,32 +207,17 @@ def make_slice_noise(
         return noise
 
     elif noise_type == C.NOISE_TYPE_SLERP:
-        alphas = torch.linspace(0.0, 1.0, D, device=device, dtype=dtype).view(1, 1, D, 1, 1)
-        noise_batches = []
-        for b in range(B):
-            z0_b = z0[b]  # (C, H, W)
-            z1_b = z1[b]  # (C, H, W)
-            z0_flat = z0_b.reshape(-1)
-            z1_flat = z1_b.reshape(-1)
-            norm_0 = z0_flat.norm()
-            norm_1 = z1_flat.norm()
+        return _slerp_volume(z0, z1, D, eps)
 
-            cos_omega = torch.dot(z0_flat, z1_flat) / (norm_0 * norm_1 + eps)
-            cos_omega = torch.clamp(cos_omega, -1.0 + 1e-7, 1.0 - 1e-7)
-            omega = torch.acos(cos_omega)
-            sin_omega = torch.sin(omega)
-
-            # Slerp weights across depth: shape (1, D, 1, 1)
-            alpha_d = alphas[0]  # (1, D, 1, 1)
-            w1 = torch.sin((1.0 - alpha_d) * omega) / (sin_omega + eps)
-            w2 = torch.sin(alpha_d * omega) / (sin_omega + eps)
-
-            # (1, D, 1, 1) * (C, 1, H, W) -> (C, D, H, W)
-            noise_b = w1 * z0_b.unsqueeze(1) + w2 * z1_b.unsqueeze(1)
-            noise_batches.append(noise_b)
-
-        noise = torch.stack(noise_batches, dim=0)  # (B, C, D, H, W)
-        return noise
+    elif freqsplit is not None:
+        low_source, cutoff = freqsplit
+        low_gain, high_gain = freqsplit_gains(H, W, cutoff, device=z0.device)
+        if low_source == C.NOISE_TYPE_SLERP:
+            low = _apply_gain(_slerp_volume(z0, z1, D, eps), low_gain)
+        else:
+            low = _apply_gain(z0, low_gain).unsqueeze(2)
+        independent = torch.randn(shape, generator=generator, device=z0.device, dtype=z0.dtype)
+        return low + _apply_gain(independent, high_gain)
 
     else:
         valid_choices = [
@@ -145,5 +226,7 @@ def make_slice_noise(
             C.NOISE_TYPE_LINEAR,
             C.NOISE_TYPE_LINEAR_VM,
             C.NOISE_TYPE_SLERP,
+            C.NOISE_TYPE_FREQSPLIT,
+            C.NOISE_TYPE_FREQSPLIT_SLERP,
         ]
         raise ValueError(f"Unknown noise_type '{noise_type}'. Choices: {valid_choices}")

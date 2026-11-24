@@ -38,6 +38,12 @@ NOISE_TYPE_CONSTANT = "constant"
 NOISE_TYPE_SLERP = "slerp"
 NOISE_TYPE_LINEAR_VM = "linear_vm"
 NOISE_TYPE_LINEAR = "linear"
+# Frequency-split couplings: low B-scan frequencies shared (freqsplit) or slerp-interpolated
+# (freqsplit_slerp) across slices, high frequencies independent per slice. An optional
+# "_fc<cutoff>" suffix sets the cutoff in cycles/pixel, e.g. "freqsplit_fc0.2".
+NOISE_TYPE_FREQSPLIT = "freqsplit"
+NOISE_TYPE_FREQSPLIT_SLERP = "freqsplit_slerp"
+FREQSPLIT_DEFAULT_CUTOFF = 0.1
 
 MODALITY_OCT = "oct"
 MODALITY_CT = "ct"

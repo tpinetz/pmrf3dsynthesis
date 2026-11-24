@@ -56,25 +56,27 @@ class FundusStem(nn.Module):
 
     TransUpNet ties one fundus row to one B-scan, so by default the fundus is resized
     to the en-face grid (128x256) before the network sees it. With the stem the crop
-    is fed at its saved resolution and strided convolutions (trained from scratch)
-    reduce it to the en-face grid. Each stage halves every axis that still needs
-    it, e.g. a 512x512 crop reaches 128x256 with strides (2, 2) and then (2, 1).
+    is fed at its saved resolution (e.g. 850x850) and convolutions trained from
+    scratch reduce it to the en-face grid. Each stage halves every axis that is
+    still at least twice the en-face size; an adaptive average pool then removes the
+    remaining non-integer factor (850x850 -> 213x425 -> 128x256). Crops that are an
+    exact power-of-two multiple of the grid need no pooling.
     """
 
-    def __init__(self, in_channels, out_channels, factors, num_groups=8):
+    def __init__(self, in_channels, out_channels, fundus_size, enface_size, num_groups=8):
         super().__init__()
-        fh, fw = factors
-        for f in (fh, fw):
-            if f < 1 or (f & (f - 1)) != 0:
-                raise ValueError(f"fundus_size / enface_size must be a power of two per axis, got {tuple(factors)}.")
+        h, w = fundus_size
+        th, tw = enface_size
+        if h < th or w < tw:
+            raise ValueError(f"fundus_size {tuple(fundus_size)} must be at least enface_size {tuple(enface_size)}.")
 
         layers = [
             nn.Conv2d(in_channels, out_channels, kernel_size=3, padding=1),
             nn.GroupNorm(num_groups, out_channels),
             nn.SiLU(inplace=True),
         ]
-        while fh > 1 or fw > 1:
-            sh, sw = (2 if fh > 1 else 1), (2 if fw > 1 else 1)
+        while h >= 2 * th or w >= 2 * tw:
+            sh, sw = (2 if h >= 2 * th else 1), (2 if w >= 2 * tw else 1)
             layers += [
                 nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=(sh, sw), padding=1),
                 nn.GroupNorm(num_groups, out_channels),
@@ -83,8 +85,10 @@ class FundusStem(nn.Module):
                 nn.GroupNorm(num_groups, out_channels),
                 nn.SiLU(inplace=True),
             ]
-            fh //= sh
-            fw //= sw
+            # conv output size with kernel 3, padding 1
+            h, w = (h - 1) // sh + 1, (w - 1) // sw + 1
+        if (h, w) != (th, tw):
+            layers.append(nn.AdaptiveAvgPool2d((th, tw)))
         self.net = nn.Sequential(*layers)
 
     def forward(self, x):
@@ -98,14 +102,12 @@ class TransUpNet(nn.Module):
         super().__init__()
         # fundus_size=None (default): the input is already on the en-face grid (legacy model,
         # checkpoints load unchanged). fundus_size=(H, W): the input is a full-resolution
-        # crop of that size and a FundusStem maps it to enface_size before patch extraction.
+        # crop of that size (any size >= enface_size, e.g. 850x850) and a FundusStem maps
+        # it to enface_size before patch extraction.
         self.fundus_size = tuple(fundus_size) if fundus_size is not None else None
         self.enface_size = tuple(enface_size)
         if self.fundus_size is not None:
-            if self.fundus_size[0] % self.enface_size[0] or self.fundus_size[1] % self.enface_size[1]:
-                raise ValueError(f"fundus_size {self.fundus_size} must be a multiple of enface_size {self.enface_size}.")
-            factors = (self.fundus_size[0] // self.enface_size[0], self.fundus_size[1] // self.enface_size[1])
-            self.stem = FundusStem(in_channels, stem_channels, factors)
+            self.stem = FundusStem(in_channels, stem_channels, self.fundus_size, self.enface_size)
             in_channels = stem_channels
         else:
             self.stem = None

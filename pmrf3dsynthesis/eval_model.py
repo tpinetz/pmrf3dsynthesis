@@ -14,6 +14,7 @@ from pmrf3dsynthesis.evaluation.radimagenet_fid import RadImageNetFeatureExtract
 from pmrf3dsynthesis.models.flow_model import FlowModel
 from pmrf3dsynthesis.models.mmse_model import MMSEModel
 from pmrf3dsynthesis.models.transupnet import fundus_input_size
+from pmrf3dsynthesis.models.slice_noise import noise_type_arg
 from torchmetrics.image import PeakSignalNoiseRatio
 from torchmetrics.image import StructuralSimilarityIndexMeasure
 from torchmetrics.image.fid import FrechetInceptionDistance
@@ -739,7 +740,7 @@ def run_cli():
     parser.add_argument('--device', type=str, default='cpu', help='Device to run the evaluation on (e.g. cuda, cpu).')
     parser.add_argument('--T', type=int, default=20, help='Number of flow steps (for FlowModel).')
     parser.add_argument('--modality', type=str, choices=[C.MODALITY_OCT, C.MODALITY_CT], default=C.MODALITY_OCT, help='Modality to evaluate on (oct or ct).')
-    parser.add_argument('--noise_type', type=str, choices=[C.NOISE_TYPE_NORMAL, C.NOISE_TYPE_CONSTANT, C.NOISE_TYPE_SLERP, C.NOISE_TYPE_LINEAR_VM, C.NOISE_TYPE_LINEAR], default=C.NOISE_TYPE_SLERP, help='Through-plane noise coupling for FlowModel (default: slerp, as in the paper).')
+    parser.add_argument('--noise_type', type=noise_type_arg, default=C.NOISE_TYPE_SLERP, help='Through-plane noise coupling for FlowModel: normal, constant, linear, linear_vm, slerp (default, as in the paper), freqsplit[_fc<cutoff>] or freqsplit_slerp[_fc<cutoff>].')
 
     # Custom path and format arguments
     parser.add_argument('--vol_path', type=str, default=None, help='Custom path to ground truth 3D volume directory.')

@@ -6,6 +6,8 @@ Controlled ablation experiment comparing 5 through-plane noise couplings:
   3. linear_vm (Variance-matched linear mixing)
   4. slerp (Spherical Linear Interpolation)
   5. linear (Plain linear mixing)
+Optional extra arms: freqsplit[_fc<cutoff>] and freqsplit_slerp[_fc<cutoff>]
+(shared or slerp low in-plane frequencies, independent high frequencies per slice).
 
 All arms use:
   - The exact same initial estimator (MMSE: 2026-01-23_11-33-50_ms_mmse_added_augs_transupnet)
@@ -37,7 +39,7 @@ from pmrf3dsynthesis.data import constants as C
 from pmrf3dsynthesis.models.flow_model import FlowModel
 from pmrf3dsynthesis.models.mmse_model import MMSEModel
 from pmrf3dsynthesis.models.transupnet import fundus_input_size
-from pmrf3dsynthesis.models.slice_noise import draw_slice_endpoints, make_slice_noise
+from pmrf3dsynthesis.models.slice_noise import draw_slice_endpoints, make_slice_noise, noise_type_arg
 from pmrf3dsynthesis.evaluation.ssim import SSIM3D
 from pmrf3dsynthesis.evaluation.retfound_fid import RETFoundFeatureExtractor
 from pmrf3dsynthesis.evaluation.radimagenet_fid import RadImageNetFeatureExtractor
@@ -192,6 +194,12 @@ def run_ablation(args):
             if set(saved_results.keys()) == set(arms):
                 all_results = saved_results
                 logging.info(f"Loaded existing results from {results_file} for resuming.")
+            else:
+                # Different arms: refuse instead of silently overwriting an earlier ablation.
+                raise SystemExit(
+                    f"{results_file} holds arms {sorted(saved_results.keys())}, not {sorted(arms)}. "
+                    "Use a new --res_path."
+                )
         except Exception as e:
             logging.warning(f"Could not load existing results for resuming: {e}")
 
@@ -469,8 +477,9 @@ def main():
     parser.add_argument(
         "--arms",
         nargs="+",
+        type=noise_type_arg,
         default=[C.NOISE_TYPE_NORMAL, C.NOISE_TYPE_CONSTANT, C.NOISE_TYPE_LINEAR_VM, C.NOISE_TYPE_SLERP, C.NOISE_TYPE_LINEAR],
-        help="Noise coupling arms to evaluate."
+        help="Noise coupling arms to evaluate (also freqsplit[_fc<cutoff>], freqsplit_slerp[_fc<cutoff>])."
     )
     parser.add_argument("--seeds", type=int, nargs="+", default=[42, 1042, 2042], help="Random seeds.")
     parser.add_argument("--T", type=int, default=20, help="Euler flow steps.")

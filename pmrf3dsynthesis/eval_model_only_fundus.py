@@ -20,6 +20,7 @@ from pmrf3dsynthesis.evaluation.ssim import SSIM3D
 from pmrf3dsynthesis.models.flow_model import FlowModel
 from pmrf3dsynthesis.models.mmse_model import MMSEModel
 from pmrf3dsynthesis.models.transupnet import fundus_input_size
+from pmrf3dsynthesis.models.slice_noise import noise_type_arg
 from pmrf3dsynthesis.eval_model import compute_sdif, compute_volume_lpips, compute_vessel_metrics, setup_fid_metric
 from pmrf3dsynthesis.vessel_segmentation.utils import load_model as load_vessel_model, extract_vessels_oct
 
@@ -684,7 +685,7 @@ def run_cli():
     parser.add_argument("--model_name", "-m", type=str, default="mmse", choices=["mmse", "mmse_model", "flow_model", "flow", "rflow"], help="Synthesis model type (default: mmse).")
     parser.add_argument("--mmse_path", type=str, default=None, help="Optional checkpoint path for auxiliary MMSE guidance model.")
     parser.add_argument("--T", type=int, default=10, help="Number of flow integration steps (default: 10).")
-    parser.add_argument("--noise_type", type=str, default=C.NOISE_TYPE_SLERP, choices=[C.NOISE_TYPE_NORMAL, C.NOISE_TYPE_CONSTANT, C.NOISE_TYPE_SLERP], help="Noise distribution for flow model.")
+    parser.add_argument("--noise_type", type=noise_type_arg, default=C.NOISE_TYPE_SLERP, help="Through-plane noise coupling for the flow model (see eval_model.py --noise_type).")
     parser.add_argument("--save_mip", action="store_true", help="Save maximum intensity projection (MIP) preview PNG for synthesized volumes.")
     parser.add_argument("--gt_vol_dir", type=str, default=None, help="Directory containing ground truth OCT volumes (.npy) for quantitative evaluation.")
     parser.add_argument("--eval_vessels", action="store_true", help="Compute vessel segmentation metrics (Dice, IoU) using pre-trained vessel model.")

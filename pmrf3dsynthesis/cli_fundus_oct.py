@@ -38,10 +38,36 @@ def load_fundus_image(path: Path) -> np.ndarray:
         return img
     return imageio.imread(str(path))
 
+def get_physical_common_size(fundus_path: Path, oct_path: Path) -> tuple[int, int] | None:
+    """Computes the OCT en-face size (height, width) in CFP pixels from DICOM spacing tags."""
+    if fundus_path.suffix.lower() != '.dcm' or oct_path.suffix.lower() != '.dcm':
+        return None
+    try:
+        d_cfp = pydicom.dcmread(str(fundus_path), stop_before_pixels=True)
+        d_oct = pydicom.dcmread(str(oct_path), stop_before_pixels=True)
+        cfp_sp = [float(x) for x in d_cfp.PixelSpacing]  # [row_mm, col_mm]
+        pm = d_oct.SharedFunctionalGroupsSequence[0].PixelMeasuresSequence[0]
+        oct_w_mm = float(pm.PixelSpacing[1]) * int(d_oct.Columns)
+        oct_d_mm = float(pm.SliceThickness) * int(d_oct.NumberOfFrames)
+        phys_h = int(round(oct_d_mm / cfp_sp[0]))
+        phys_w = int(round(oct_w_mm / cfp_sp[1]))
+        if phys_h > 0 and phys_w > 0:
+            return (phys_h, phys_w)
+    except Exception:
+        return None
+    return None
+
+
 def load_oct_volume(path: Path) -> np.ndarray:
     if path.suffix.lower() == '.dcm':
-        dcm = pydicom.dcmread(str(path))
-        oct_vol = dcm.pixel_array
+        try:
+            dcm = pydicom.dcmread(str(path))
+            oct_vol = dcm.pixel_array
+        except Exception:
+            oct_vol = sitk.GetArrayFromImage(sitk.ReadImage(str(path)))
+    elif path.suffix.lower() in ('.tif', '.tiff'):
+        import tifffile
+        oct_vol = tifffile.imread(str(path))
     elif path.suffix.lower() == '.npy':
         oct_vol = np.load(str(path))
     else:
@@ -147,17 +173,22 @@ def main(fundus_path: Path, oct_path: Path, res_path: Path, common_size: int = -
             fixed_vessels = extract_vessels_oct(oct_img, ves_model, device=device)
 
             if common_size < 0:
-                new_size = max(fixed_vessels.shape)  # default size if not provided
+                phys_size = get_physical_common_size(fundus_img_path, oct_img_path)
+                if phys_size is not None:
+                    new_h, new_w = phys_size
+                else:
+                    s = max(fixed_vessels.shape)
+                    new_h, new_w = s, s
             else:
-                new_size = common_size
+                new_h, new_w = common_size, common_size
 
-            fixed_vessels_uint = (resize(fixed_vessels, (new_size, new_size)) * 255).astype(np.uint8)
+            fixed_vessels_uint = (resize(fixed_vessels, (new_h, new_w)) * 255).astype(np.uint8)
             moving_vessels_uint = (moving_vessels * 255).astype(np.uint8)
 
             rad = 700
             _, M = adapt_large_to_small(fixed_vessels_uint,
                                         moving_vessels_uint[max(fovea_y-rad, 0):fovea_y+rad, max(0, fovea_x-rad):fovea_x+rad])
-            cropped_fundus = cv2.warpAffine(fundus_img[max(fovea_y-rad, 0):fovea_y+rad, max(0, fovea_x-rad):fovea_x+rad], M, (new_size, new_size))
+            cropped_fundus = cv2.warpAffine(fundus_img[max(fovea_y-rad, 0):fovea_y+rad, max(0, fovea_x-rad):fovea_x+rad], M, (new_w, new_h))
             
             save_name = f"{fundus_img_path.stem}.png" if fundus_img_path.suffix.lower() == '.dcm' else fundus_img_path.name
             save_path = res_path / save_name

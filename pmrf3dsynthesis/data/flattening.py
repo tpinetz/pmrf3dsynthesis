@@ -1,12 +1,83 @@
-import numpy as np
-import yaml
 from pathlib import Path
+from typing import Optional, Tuple
 
-def extract_case_and_seg(img_path: Path, res_path: Path, case: str, suffix="") -> tuple[np.ndarray, np.ndarray]:
+import numpy as np
+import pydicom
+import yaml
+
+_YAML_LOADER = getattr(yaml, "CSafeLoader", yaml.SafeLoader)
+
+
+def _load_oct_scan(oct_file: Path) -> np.ndarray:
+    """Loads an OCT volume from a .npy or .dcm file, preferring SimpleITK for DICOM to avoid JPEG2000 pillow errors."""
+    if oct_file.suffix.lower() == ".dcm":
+        try:
+            import SimpleITK as sitk
+            return sitk.GetArrayFromImage(sitk.ReadImage(str(oct_file)))
+        except Exception:
+            return pydicom.dcmread(str(oct_file)).pixel_array
+    return np.load(oct_file)
+
+
+def _resolve_oct_file(img_path: Path, case: str) -> Path:
+    """Resolves an OCT scan file path from a direct file or directory + case stem."""
+    if img_path.is_file():
+        return img_path
+    for ext in (".npy", ".dcm"):
+        candidate = img_path / f"{case}{ext}"
+        if candidate.exists():
+            return candidate
+    raise FileNotFoundError(f"Could not find .npy or .dcm OCT scan for '{case}' in {img_path}")
+
+
+def _flatten_with_indices(
+    _img: np.ndarray,
+    _a: np.ndarray,
+    final_res: int = 512,
+    _seg: Optional[np.ndarray] = None,
+    flatten_frac: float = 0.75,
+) -> Tuple[np.ndarray, Optional[np.ndarray]]:
+    """Shifts each A-scan so the reference index in `_a` aligns at `int(final_res * flatten_frac)`."""
+    if _img.shape[1] < final_res:
+        _img = np.pad(_img, ((0, 0), (0, final_res - _img.shape[1]), (0, 0)))
+        if _seg is not None:
+            _seg = np.pad(_seg, ((0, 0), (0, final_res - _seg.shape[1]), (0, 0)))
+
+    result = np.zeros((_img.shape[0], final_res, _img.shape[2]), dtype=_img.dtype)
+    result_seg = (
+        np.zeros((_img.shape[0], final_res, _img.shape[2]), dtype=_seg.dtype)
+        if _seg is not None
+        else None
+    )
+
+    target_point = int(final_res * flatten_frac)
+    bottom_res = final_res - target_point
+    for i in range(_img.shape[0]):
+        for j in range(_img.shape[2]):
+            flidx = int(_a[i, j])
+            if flidx < target_point:
+                if flidx > 0:
+                    result[i, target_point - flidx:target_point, j] = _img[i, :flidx, j]
+                    if result_seg is not None:
+                        result_seg[i, target_point - flidx:target_point, j] = _seg[i, :flidx, j]
+            else:
+                result[i, :target_point, j] = _img[i, flidx - target_point:flidx, j]
+                if result_seg is not None:
+                    result_seg[i, :target_point, j] = _seg[i, flidx - target_point:flidx, j]
+
+            end_point = min(_img.shape[1] - flidx, bottom_res)
+            if end_point > 0:
+                result[i, target_point:target_point + end_point, j] = _img[i, flidx:flidx + end_point, j]
+                if result_seg is not None:
+                    result_seg[i, target_point:target_point + end_point, j] = _seg[i, flidx:flidx + end_point, j]
+    return result, result_seg
+
+
+def extract_case_and_seg(img_path: Path, res_path: Path, case: str, suffix="") -> Tuple[np.ndarray, np.ndarray]:
     """
-    Loads the base scan and segmentation map from SD-Layer results and constructs the segmentation map and numnpy array.
-    
-    :param img_path: Path to image directory
+    Loads the base scan and segmentation map from SD-Layer results and constructs the segmentation map and numpy array.
+
+    :param img_path: Path to image directory or OCT file
     :type img_path: Path
     :param res_path: Path to SD-Layer based segmentation results
     :type res_path: Path
@@ -14,57 +85,88 @@ def extract_case_and_seg(img_path: Path, res_path: Path, case: str, suffix="") -
     :type case: str
     :param suffix: Orientation of the eye scan, defaults to ""
     """
-    base_scan = np.load(img_path / (case + ".npy")) 
+    oct_file = _resolve_oct_file(Path(img_path), case)
+    base_scan = _load_oct_scan(oct_file)
     if len(base_scan.shape) == 4:
         eval_scan = int(suffix[-1])
         base_scan = base_scan[eval_scan]
-        
-    slices = []
-    for layer in sorted(list((res_path / (case + suffix) / "layers").iterdir())):
-        with open(layer, "r") as f:
-            slices.append(yaml.safe_load(f))
-    layer_keys = []
-    for i  in range(12):
-        layer_keys.append(list(slices[0]['layers'][i].keys())[0])
 
+    layer_dir = Path(res_path) / (case + suffix) / "layers"
+    layer_files = sorted(p for p in layer_dir.iterdir() if p.suffix in (".yml", ".yaml"))
+    slices = []
+    for layer in layer_files:
+        with open(layer, "r") as f:
+            slices.append(yaml.load(f, Loader=_YAML_LOADER))
+
+    layer_keys = [list(slices[0]["layers"][i].keys())[0] for i in range(12)]
     seg_map = np.zeros_like(base_scan)
-    init_vals = np.zeros(512).astype(int)
-    
-    
+    init_vals = np.zeros(base_scan.shape[2], dtype=int)
+
     for slidx, _slice in enumerate(slices):
-        for i, name  in zip(range(12), layer_keys):
-            for j, new_val in enumerate(slices[slidx]['layers'][i][name][0]['values'].split(",")):
+        for i, name in zip(range(12), layer_keys):
+            for j, new_val in enumerate(_slice["layers"][i][name][0]["values"].split(",")):
                 seg_map[slidx, init_vals[j]:int(new_val), j] = i + 1
                 init_vals[j] = int(new_val)
     return base_scan, seg_map
 
-def flatten_at_half(_img: np.ndarray, _seg: np.ndarray, final_res: int=512):
+
+def flatten_at_half(_img: np.ndarray, _seg: np.ndarray, final_res: int = 512, flatten_frac: float = 0.75):
     """
-    Flattens the OCT scan at the half point of the retina based on the segmentation map.
-    
+    Flattens the OCT scan at `flatten_frac` of the vertical resolution based on the segmentation map.
+
     :param _img: The oct scan to be flattened
     :type _img: np.ndarray
     :param _seg: The segmentation map used for flattening as generated by extract_case_and_seg
     :type _seg: np.ndarray
     :param final_res: Final resolution of the flattened image
     :type final_res: int
+    :param flatten_frac: Vertical position fraction where BM is aligned (default 0.75)
+    :type flatten_frac: float
     """
-    result = np.zeros((_img.shape[0], final_res, _img.shape[2]))
-    result_seg = np.zeros((_img.shape[0], final_res, _img.shape[2]))
     _a = np.argmax(_seg == 12, axis=1)
-    half_point = final_res // 2
-    for i in range(_img.shape[0]):
-        for j in range(_img.shape[2]):
-            flidx = _a[i,j]
-            if flidx < half_point:
-                result[i, half_point - flidx:half_point, j] = _img[i, :flidx, j]
-                result_seg[i, half_point - flidx:half_point, j] = _seg[i, :flidx, j]
-                result[i, half_point:,j] = _img[i, flidx:flidx + half_point, j]
-                result_seg[i, half_point:,j] = _seg[i, flidx:flidx + half_point, j]
-            else:
-                result[i, :half_point, j] = _img[i, flidx - half_point: flidx, j]
-                result_seg[i, :half_point, j] = _seg[i, flidx - half_point: flidx, j]
-                end_point = min(_img.shape[1] - flidx, half_point) 
-                result[i, half_point:half_point + end_point, j] = _img[i, flidx:flidx+end_point, j]
-                result_seg[i, half_point:half_point + end_point, j] = _seg[i, flidx:flidx+end_point, j]
+    result, result_seg = _flatten_with_indices(_img, _a, final_res=final_res, _seg=_seg, flatten_frac=flatten_frac)
     return result, result_seg
+
+
+def extract_and_flatten_oct(
+    oct_file: Path,
+    seg_dir: Path,
+    final_res: int = 512,
+    flatten_frac: float = 0.75,
+) -> np.ndarray:
+    """
+    Fast extraction and flattening of a 3D OCT scan using BM/HL-S boundaries from SD-Layer YAML outputs.
+
+    Avoids materializing the full 3D segmentation map when only the flattened OCT volume is needed.
+    """
+    base_scan = _load_oct_scan(Path(oct_file))
+    if base_scan.ndim != 3:
+        raise ValueError(f"Expected 3D OCT volume for {oct_file}, got shape {base_scan.shape}")
+
+    layer_dir = Path(seg_dir) / "layers"
+    layer_files = sorted(p for p in layer_dir.iterdir() if p.suffix in (".yml", ".yaml"))
+    if len(layer_files) != base_scan.shape[0]:
+        raise ValueError(
+            f"Slice count mismatch for {oct_file}: volume has {base_scan.shape[0]} slices, "
+            f"segmentation has {len(layer_files)} YAML files in {layer_dir}"
+        )
+
+    height = base_scan.shape[1]
+    width = base_scan.shape[2]
+    _a = np.zeros((base_scan.shape[0], width), dtype=int)
+
+    for slidx, layer_file in enumerate(layer_files):
+        with open(layer_file, "r") as f:
+            data = yaml.load(f, Loader=_YAML_LOADER)
+        layers = data["layers"]
+        bm_key = list(layers[10].keys())[0]
+        hls_key = list(layers[11].keys())[0]
+        bm_vals = np.fromstring(layers[10][bm_key][0]["values"], dtype=int, sep=",")
+        hls_vals = np.fromstring(layers[11][hls_key][0]["values"], dtype=int, sep=",")
+        bm_clamped = np.clip(bm_vals, 0, height)
+        hls_clamped = np.clip(hls_vals, 0, height)
+        _a[slidx] = np.where(bm_clamped < hls_clamped, bm_clamped, 0)
+
+    result, _ = _flatten_with_indices(base_scan, _a, final_res=final_res, flatten_frac=flatten_frac)
+    return result
+

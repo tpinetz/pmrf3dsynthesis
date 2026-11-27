@@ -275,6 +275,17 @@ def analyze(raw_pkl_path: str, out_dir: Optional[str] = None, modality: str = "a
             if col != "Case" and df[col].dropna().count() > 0:
                 available_cols.add(col)
 
+    hypothesis_metrics = [
+        "Adjacent_SSIM_Gap",
+        "Log_Spectral_Distance",
+        "Orthogonal_SSIM_mean",
+        "Orthogonal_LPIPS_mean",
+        "SDIF",
+        "SSIM"
+    ]
+    if not is_ct and has_vessels:
+        hypothesis_metrics.append("Vessel_Dice")
+
     summary_metrics = [m for m in summary_metrics if (m in available_cols or m == "FID")]
     hypothesis_metrics = [m for m in hypothesis_metrics if m in available_cols]
 

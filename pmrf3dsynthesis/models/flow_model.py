@@ -8,6 +8,7 @@ from torchvision.utils import make_grid
 from pl_bolts.optimizers.lr_scheduler import LinearWarmupCosineAnnealingLR
 
 from pmrf3dsynthesis.models.edm_network import SongUNet, Song3DUNet
+from pmrf3dsynthesis.models.edm_network_3dcond import Song3DCondUNet
 from pmrf3dsynthesis.models.model_jit import JiT_models
 from pmrf3dsynthesis.models.slice_noise import make_slice_noise
 from pmrf3dsynthesis.data import constants as C
@@ -49,6 +50,17 @@ class FlowModel(lightning.LightningModule):
             self.network_3d = Song3DUNet(config.get("image_resolution", 224), config.get("in_channels", 1),
             config.get("out_channels", 1), model_channels=config.get("model_channels", 16))
             self.network = lambda x, t, c: self.network_3d(x)       # my implementation of Song3DUNet does not use time or classes
+        elif self.network_name == C.SONG_3DCONDUNET:
+            # Paired 3D flow (eye-screen FlowModel, network "song3dcond"): whole-volume, time-conditioned.
+            self.network_3d = Song3DCondUNet(
+                config.get("image_resolution", 256), config.get("in_channels", 1), config.get("out_channels", 1),
+                model_channels=config.get("model_channels", 32),
+                channel_mult=list(config.get("channel_mult", [1, 2, 2, 2])),
+                num_blocks=config.get("num_blocks", 2),
+                dropout=config.get("dropout", 0.0),
+                channels_last=config.get("channels_last", False),
+            )
+            self.network = lambda x, t, c: self.network_3d(x, t)
         else:
             raise NotImplementedError(f"Network {self.network_name} not implemented in FlowModel!")
 
@@ -97,6 +109,18 @@ class FlowModel(lightning.LightningModule):
 
                 x_orig = x + self.sigma_start * noise
                 y_hat = x_orig.clone()
+                if self.network_name == C.SONG_3DCONDUNET:
+                    # Whole-volume Euler integration, as in eye-screen FlowModel.validation_step.
+                    use_bf16 = y_hat.is_cuda and str(self.config.get("eval_precision", "bf16")) == "bf16"
+                    for i in range(T):
+                        t = i / T * torch.ones(y_hat.shape[0], dtype=torch.float32, device=y_hat.device)
+                        with torch.autocast("cuda", dtype=torch.bfloat16, enabled=use_bf16):
+                            test = self.network(y_hat, t, None)
+                        vel = (test.float() - y_hat) / max((1.0 - i / T), self.t_eps)
+                        y_hat += 1 / T * vel
+                    if return_mmse:
+                        return y_hat, mmse_pred
+                    return y_hat
                 for _slice in range(x.shape[2]):
                     for i in range(T):
                         test = self.network(y_hat[:, :, _slice, :, :], i / T * torch.ones((1), dtype=torch.float32).to(y_hat.device), torch.zeros((1), dtype=torch.int).to(y_hat.device))

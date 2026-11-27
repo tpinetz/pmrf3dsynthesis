@@ -39,7 +39,11 @@ class MMSEModel(lightning.LightningModule):
         elif self.network_name == C.MODEL_TRANSUPNET:
             from .transupnet import TransUpNet
             self.network = TransUpNet(in_channels=config.get("in_channels", 1),
-                                      slides=config.get("slices", 256), ct_transform=config.get("ct_transform", False))
+                                      slides=config.get("slices", 256), ct_transform=config.get("ct_transform", False),
+                                      residual_prediction=config.get("residual_prediction", True),
+                                      fundus_size=config.get("fundus_size", None),
+                                      enface_size=config.get("enface_size", (128, 256)),
+                                      stem_channels=config.get("stem_channels", 32))
         else:
             raise NotImplementedError()
         

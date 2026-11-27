@@ -8,6 +8,7 @@ calculates 95% bootstrap confidence intervals, and formats comparison tables.
 
 import argparse
 import pickle
+import re
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
 
@@ -37,6 +38,19 @@ ARM_PRETTY_NAMES = {
     "slerp": "D: SLERP",
     "linear": "E: Plain Linear (No VM)",
 }
+
+
+def arm_pretty_name(arm: str) -> str:
+    """Pretty name for an arm, including freqsplit[_slerp][_fc<cutoff>] arms."""
+    if arm in ARM_PRETTY_NAMES:
+        return ARM_PRETTY_NAMES[arm]
+    # Kept import-free so the script runs without the package on the path.
+    m = re.match(r"^freqsplit(_slerp)?(?:_fc([0-9]*\.?[0-9]+))?$", arm)
+    if m is not None:
+        low = "SLERP" if m.group(1) else "shared"
+        cutoff = float(m.group(2)) if m.group(2) else 0.1
+        return f"Freq-split ({low} low band, fc={cutoff:g})"
+    return arm
 
 
 def bootstrap_ci(data: np.ndarray, num_boot: int = 2000, ci: float = 0.95) -> Tuple[float, float]:
@@ -128,7 +142,7 @@ def generate_summary_table(
     """Generates formatted Mean +/- STD summary table for all arms."""
     rows = []
     for arm, df in per_arm_dfs.items():
-        row = {"Arm": ARM_PRETTY_NAMES.get(arm, arm)}
+        row = {"Arm": arm_pretty_name(arm)}
         for m in metrics_to_show:
             if m == "FID":
                 row[METRIC_PRETTY_NAMES.get(m, m)] = f"{per_arm_fids.get(arm, np.nan):.2f}"
@@ -205,8 +219,8 @@ def run_paired_hypothesis_tests(
 
             test_rows.append({
                 "Metric": METRIC_PRETTY_NAMES.get(metric, metric),
-                "Arm 1": ARM_PRETTY_NAMES.get(arm1, arm1),
-                "Arm 2": ARM_PRETTY_NAMES.get(arm2, arm2),
+                "Arm 1": arm_pretty_name(arm1),
+                "Arm 2": arm_pretty_name(arm2),
                 "Median Diff (1 - 2)": f"{med_diff:+.4f}",
                 "95% CI": f"[{ci_low:+.4f}, {ci_high:+.4f}]",
                 "Raw p": f"{p_raw:.4e}" if p_raw < 0.001 else f"{p_raw:.4f}",

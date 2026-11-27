@@ -13,6 +13,8 @@ from pmrf3dsynthesis.evaluation.retfound_fid import RETFoundFeatureExtractor
 from pmrf3dsynthesis.evaluation.radimagenet_fid import RadImageNetFeatureExtractor
 from pmrf3dsynthesis.models.flow_model import FlowModel
 from pmrf3dsynthesis.models.mmse_model import MMSEModel
+from pmrf3dsynthesis.models.transupnet import fundus_input_size
+from pmrf3dsynthesis.models.slice_noise import noise_type_arg
 from torchmetrics.image import PeakSignalNoiseRatio
 from torchmetrics.image import StructuralSimilarityIndexMeasure
 from torchmetrics.image.fid import FrechetInceptionDistance
@@ -207,7 +209,8 @@ def load_sample(
     hu_max: float = 150.0,
     ct_scale: float = 5800.0,
     xray_scale: float = 1200.0,
-    target_vol_shape: Optional[Tuple[int, int, int]] = None
+    target_vol_shape: Optional[Tuple[int, int, int]] = None,
+    fundus_size: Tuple[int, int] = (128, 256)
 ) -> Tuple[np.ndarray, np.ndarray]:
     """
     Loads 2D input image and 3D ground truth volume for a given case key.
@@ -241,7 +244,7 @@ def load_sample(
         input_img = iio.imread(img_file)
         if input_img.dtype == np.uint8:
             input_img = input_img / 255.0
-        input_img = resize(input_img, (128, 256))
+        input_img = resize(input_img, tuple(fundus_size))
 
         return input_img, volume
 
@@ -427,7 +430,7 @@ def evaluate_model(
     keys: List[str],
     res_path: Path,
     modality: str = C.MODALITY_OCT,
-    noise_type: str = C.NOISE_TYPE_NORMAL,
+    noise_type: str = C.NOISE_TYPE_SLERP,
     vol_path: Optional[Path] = None,
     img_path: Optional[Path] = None,
     data_dir: Optional[Path] = None,
@@ -445,7 +448,8 @@ def evaluate_model(
     eval_lpips: bool = True,
     eval_sdif: bool = True,
     save_nii: bool = False,
-    device: str = 'cpu'
+    device: str = 'cpu',
+    fundus_size: Tuple[int, int] = (128, 256)
 ) -> Dict:
     """Evaluates model over dataset cases and computes PSNR, SSIM, LPIPS, SDIF, FID, and optional vessel metrics."""
     res_path.mkdir(parents=True, exist_ok=True)
@@ -498,7 +502,8 @@ def evaluate_model(
                 hu_min=hu_min,
                 hu_max=hu_max,
                 ct_scale=ct_scale,
-                xray_scale=xray_scale
+                xray_scale=xray_scale,
+                fundus_size=fundus_size
             )
         except Exception as e:
             logging.error(f"Error loading sample {key}: {e}. Skipping.")
@@ -735,7 +740,7 @@ def run_cli():
     parser.add_argument('--device', type=str, default='cpu', help='Device to run the evaluation on (e.g. cuda, cpu).')
     parser.add_argument('--T', type=int, default=20, help='Number of flow steps (for FlowModel).')
     parser.add_argument('--modality', type=str, choices=[C.MODALITY_OCT, C.MODALITY_CT], default=C.MODALITY_OCT, help='Modality to evaluate on (oct or ct).')
-    parser.add_argument('--noise_type', type=str, choices=[C.NOISE_TYPE_NORMAL, C.NOISE_TYPE_CONSTANT, C.NOISE_TYPE_SLERP, C.NOISE_TYPE_LINEAR_VM, C.NOISE_TYPE_LINEAR], default=C.NOISE_TYPE_NORMAL, help='Type of noise to apply.')
+    parser.add_argument('--noise_type', type=noise_type_arg, default=C.NOISE_TYPE_SLERP, help='Through-plane noise coupling for FlowModel: normal, constant, linear, linear_vm, slerp (default, as in the paper), freqsplit[_fc<cutoff>] or freqsplit_slerp[_fc<cutoff>].')
 
     # Custom path and format arguments
     parser.add_argument('--vol_path', type=str, default=None, help='Custom path to ground truth 3D volume directory.')
@@ -822,7 +827,8 @@ def run_cli():
         eval_lpips=not args.no_lpips,
         eval_sdif=not args.no_sdif,
         save_nii=args.save_nii,
-        device=args.device
+        device=args.device,
+        fundus_size=fundus_input_size(model)
     )
 
     with open(res_path / "eval_results.pkl", "wb") as f:
